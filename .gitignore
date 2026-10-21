@@ -1,0 +1,10 @@
+node_modules/
+dist/
+doc/
+.claude/
+.agents/
+*.bak
+tmp/
+.test/
+AGENTS.md
+CLAUDE.md

@@ -1,0 +1,101 @@
+{
+  "name": "subagent-cockpit-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that delegates tasks to external coding agents over the Agent Client Protocol",
+  "author": "yejianfei.billy",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/dofunc/subagent-cockpit-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dofunc/subagent-cockpit-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dofunc/subagent-cockpit-mcp/issues"
+  },
+  "type": "module",
+  "bin": {
+    "subagent-cockpit-mcp": "./dist/cli.js"
+  },
+  "types": "./dist/types.d.ts",
+  "exports": {
+    "./types": {
+      "types": "./dist/types.d.ts"
+    }
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "webpack --mode production && tsc src/types.ts --declaration --emitDeclarationOnly --outDir dist --target ES2022 --module ES2022 --moduleResolution bundler --strict --skipLibCheck",
+    "build:webui": "webpack --config-name web",
+    "webui:mock": "npm run build && node --import tsx mock/webui.ts",
+    "lint": "eslint src/ mock/",
+    "test": "npm run test:unit",
+    "test:unit": "npm run build && node --import tsx --test test/adapter/adapter.test.ts test/session/session-store.test.ts test/session/session-manager.test.ts test/server.test.ts test/cli.test.ts test/lint-boundary.test.ts test/webui/transcript.test.ts test/webui/webui.test.ts",
+    "test:mock": "npm run build && playwright test --project=mock",
+    "test:fast": "npm run build && playwright test --project=fast",
+    "test:e2e": "npm run build && playwright test --project=e2e",
+    "test:report": "playwright show-report .test/playwright-report",
+    "test:e2e:codex": "npm run build && playwright test --project=e2e test/specs/e2e/codex.spec.ts",
+    "test:e2e:claude": "npm run build && playwright test --project=e2e test/specs/e2e/claude.spec.ts",
+    "test:e2e:grok": "npm run build && playwright test --project=e2e test/specs/e2e/grok.spec.ts",
+    "test:e2e:opencode": "npm run build && playwright test --project=e2e test/specs/e2e/opencode.spec.ts",
+    "test:e2e:antigravity": "npm run build && playwright test --project=e2e test/specs/e2e/antigravity.spec.ts",
+    "test:e2e:concurrent": "npm run build && playwright test --project=e2e test/specs/e2e/concurrent.spec.ts",
+    "check:deps": "node scripts/check-deps.js"
+  },
+  "keywords": [
+    "mcp",
+    "acp",
+    "agent-client-protocol",
+    "codex",
+    "claude-code",
+    "claude",
+    "grok",
+    "opencode",
+    "antigravity",
+    "subagent",
+    "multi-agent",
+    "agent-orchestration",
+    "webui"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.93.0",
+    "@agentclientprotocol/codex-acp": "2.2.2",
+    "@agentclientprotocol/sdk": "^1.8.0",
+    "@ant-design/icons": "^6.3.4",
+    "@ant-design/x": "^2.9.0",
+    "@ant-design/x-markdown": "^2.9.0",
+    "@eslint/js": "^10.0.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@types/ws": "^8.18.2",
+    "@typescript-eslint/eslint-plugin": "^8.71.2",
+    "@typescript-eslint/parser": "^8.71.2",
+    "antd": "^6.6.7",
+    "commander": "^14.0.3",
+    "copy-webpack-plugin": "^14.0.0",
+    "css-loader": "^7.1.5",
+    "diff": "^9.0.0",
+    "eslint": "^10.12.0",
+    "globals": "^17.13.0",
+    "html-webpack-plugin": "^5.6.8",
+    "mini-css-extract-plugin": "^2.10.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-syntax-highlighter": "^16.1.2",
+    "ts-loader": "^9.6.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "webpack": "^5.111.1",
+    "webpack-cli": "^6.0.1",
+    "ws": "^8.22.0"
+  }
+}

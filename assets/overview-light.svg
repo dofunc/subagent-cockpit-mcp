@@ -1,0 +1,258 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600" role="img" aria-labelledby="title">
+  <title id="title">The main agent talks MCP to subagent-cockpit-mcp, which talks ACP to Codex, Claude Code, Grok Build, OpenCode and Antigravity, and reports the activity to a read-only web UI monitor. Its tools cover prompts, approvals, questions, snapshots, sessions and config</title>
+  <style>
+    .bg { fill: #f8fafc; }
+    .box { fill: #ffffff; stroke: #cbd5e1; }
+    .main { fill: #ecfeff; stroke: #0891b2; }
+    .mcp { fill: #ecfdf5; stroke: #059669; }
+    .t { fill: #0f172a; }
+    .m { fill: #64748b; }
+    .edge { stroke: #94a3b8; }
+    .head { fill: #94a3b8; }
+    .em { stroke: #059669; }
+    .emh, .lbl { fill: #059669; }
+    .lbl2 { fill: #64748b; }
+    .mono { fill: #000000; }
+    .cap { fill: #f5f3ff; stroke: #7c3aed; }
+    .mon { fill: #fffbeb; stroke: #d97706; }
+    .f-mcp { stroke: #2563eb; }
+    .f-acp { stroke: #3b82f6; }
+    .f-mon { stroke: #f59e0b; }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .name { font-size: 16px; font-weight: 600; }
+    .sub { font-size: 12.5px; }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 15px; font-weight: 600; }
+    .tag { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+    .cap-name { font-size: 14px; font-weight: 600; }
+    .tool { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+    .flow path { fill: none; stroke-linecap: round; animation-duration: 3.99s; animation-timing-function: linear; animation-iteration-count: infinite; }
+    .flow .tail { stroke-width: 5; opacity: 0.2; }
+    .flow .mid { stroke-width: 3.5; opacity: 0.5; }
+    .flow .head { stroke-width: 2.5; opacity: 1; }
+    .r1 path { animation-delay: -1.33s; }
+    .r2 path { animation-delay: -2.66s; }
+    @keyframes k-mcp-tail { 0%, 0.00% { stroke-dashoffset: 20; } 17.89%, 100% { stroke-dashoffset: -84; } }
+    @keyframes k-mcp-mid { 0%, 0.00% { stroke-dashoffset: 13; } 17.89%, 100% { stroke-dashoffset: -91; } }
+    @keyframes k-mcp-head { 0%, 0.00% { stroke-dashoffset: 8; } 17.89%, 100% { stroke-dashoffset: -96; } }
+    @keyframes k-monitor-tail { 0%, 14.31% { stroke-dashoffset: 20; } 25.58%, 100% { stroke-dashoffset: -47; } }
+    @keyframes k-monitor-mid { 0%, 14.31% { stroke-dashoffset: 13; } 25.58%, 100% { stroke-dashoffset: -54; } }
+    @keyframes k-monitor-head { 0%, 14.31% { stroke-dashoffset: 8; } 25.58%, 100% { stroke-dashoffset: -59; } }
+    @keyframes k-trunk-tail { 0%, 14.31% { stroke-dashoffset: 20; } 28.62%, 100% { stroke-dashoffset: -64; } }
+    @keyframes k-trunk-mid { 0%, 14.31% { stroke-dashoffset: 13; } 28.62%, 100% { stroke-dashoffset: -71; } }
+    @keyframes k-trunk-head { 0%, 14.31% { stroke-dashoffset: 8; } 28.62%, 100% { stroke-dashoffset: -76; } }
+    @keyframes k-codex-tail { 0%, 25.04% { stroke-dashoffset: 20; } 66.01%, 100% { stroke-dashoffset: -213; } }
+    @keyframes k-codex-mid { 0%, 25.04% { stroke-dashoffset: 13; } 66.01%, 100% { stroke-dashoffset: -220; } }
+    @keyframes k-codex-head { 0%, 25.04% { stroke-dashoffset: 8; } 66.01%, 100% { stroke-dashoffset: -225; } }
+    @keyframes k-claude-tail { 0%, 25.04% { stroke-dashoffset: 20; } 53.13%, 100% { stroke-dashoffset: -141; } }
+    @keyframes k-claude-mid { 0%, 25.04% { stroke-dashoffset: 13; } 53.13%, 100% { stroke-dashoffset: -148; } }
+    @keyframes k-claude-head { 0%, 25.04% { stroke-dashoffset: 8; } 53.13%, 100% { stroke-dashoffset: -153; } }
+    @keyframes k-grok-tail { 0%, 25.04% { stroke-dashoffset: 20; } 39.18%, 100% { stroke-dashoffset: -63; } }
+    @keyframes k-grok-mid { 0%, 25.04% { stroke-dashoffset: 13; } 39.18%, 100% { stroke-dashoffset: -70; } }
+    @keyframes k-grok-head { 0%, 25.04% { stroke-dashoffset: 8; } 39.18%, 100% { stroke-dashoffset: -75; } }
+    @keyframes k-opencode-tail { 0%, 25.04% { stroke-dashoffset: 20; } 53.13%, 100% { stroke-dashoffset: -141; } }
+    @keyframes k-opencode-mid { 0%, 25.04% { stroke-dashoffset: 13; } 53.13%, 100% { stroke-dashoffset: -148; } }
+    @keyframes k-opencode-head { 0%, 25.04% { stroke-dashoffset: 8; } 53.13%, 100% { stroke-dashoffset: -153; } }
+    @keyframes k-agy-tail { 0%, 25.04% { stroke-dashoffset: 20; } 66.01%, 100% { stroke-dashoffset: -213; } }
+    @keyframes k-agy-mid { 0%, 25.04% { stroke-dashoffset: 13; } 66.01%, 100% { stroke-dashoffset: -220; } }
+    @keyframes k-agy-head { 0%, 25.04% { stroke-dashoffset: 8; } 66.01%, 100% { stroke-dashoffset: -225; } }
+    @keyframes k-reply-tail { 0%, 75.31% { stroke-dashoffset: 20; } 93.20%, 100% { stroke-dashoffset: -84; } }
+    @keyframes k-reply-mid { 0%, 75.31% { stroke-dashoffset: 13; } 93.20%, 100% { stroke-dashoffset: -91; } }
+    @keyframes k-reply-head { 0%, 75.31% { stroke-dashoffset: 8; } 93.20%, 100% { stroke-dashoffset: -96; } }
+    @media (prefers-reduced-motion: reduce) { .flows { display: none; } }
+  </style>
+  <defs>
+    <filter id="ag_fav_f0" x="2.49348" y="-26.5423" width="69.0899" height="61.2525" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="3.89034"/></filter>
+    <filter id="ag_fav_f1" x="28.7524" y="-32.0333" width="135.477" height="134.313" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="18.8078"/></filter>
+    <filter id="ag_fav_f2" x="-62.2884" y="-21.9253" width="142.637" height="127.18" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="15.9884"/></filter>
+    <filter id="ag_fav_f3" x="-52.5697" y="-20.8346" width="127.582" height="127.452" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="15.9884"/></filter>
+    <filter id="ag_fav_f4" x="17.3619" y="45.4646" width="116.786" height="118.715" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="15.1937"/></filter>
+    <filter id="ag_fav_f5" x="-7.44765" y="-60.4737" width="125.303" height="122.858" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="13.7698"/></filter>
+    <filter id="ag_fav_f6" x="-27.7086" y="13.3597" width="157.119" height="162.029" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="12.297"/></filter>
+    <filter id="ag_fav_f7" x="50.4638" y="16.981" width="87.3973" height="83.7738" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="11.0036"/></filter>
+    <filter id="ag_fav_f8" x="34.2604" y="-28.457" width="116.701" height="104.506" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="9.29385"/></filter>
+    <filter id="ag_fav_f9" x="-15.1522" y="-15.9493" width="77.2941" height="91.076" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="11.5027"/></filter>
+  </defs>
+
+  <rect class="bg" width="1000" height="600" rx="16"/>
+
+  <!-- Main agent <-> MCP server -->
+  <line class="em" x1="240" y1="218" x2="320" y2="218" stroke-width="2.5"/>
+  <polygon class="emh" points="230,218 241,212 241,224"/>
+  <polygon class="emh" points="330,218 319,212 319,224"/>
+  <text class="tag lbl" x="280" y="206" text-anchor="middle">MCP</text>
+
+  <!-- MCP server <-> subagents -->
+  <g class="edge" fill="none" stroke-width="2">
+    <path d="M590 218 H709"/>
+    <path d="M709 62 H664 Q650 62 650 76 V360 Q650 374 664 374 H709"/>
+    <path d="M650 140 H709"/>
+    <path d="M650 296 H709"/>
+  </g>
+  <g class="head">
+    <polygon points="580,218 591,212 591,224"/>
+    <polygon points="720,62 709,56 709,68"/>
+    <polygon points="720,140 709,134 709,146"/>
+    <polygon points="720,218 709,212 709,224"/>
+    <polygon points="720,296 709,290 709,302"/>
+    <polygon points="720,374 709,368 709,380"/>
+  </g>
+  <text class="tag lbl2" x="615" y="206" text-anchor="middle">ACP</text>
+
+  <!-- MCP server -> what its tools do -->
+  <g class="edge" fill="none" stroke-width="1.75" stroke-dasharray="6 5">
+    <path d="M455 258 V470"/>
+    <path d="M112.5 485 V480 Q112.5 470 122.5 470 H887.5 Q897.5 470 897.5 480 V485"/>
+    <path d="M269.5 470 V485"/>
+    <path d="M426.5 470 V485"/>
+    <path d="M583.5 470 V485"/>
+    <path d="M740.5 470 V485"/>
+  </g>
+  <g class="head">
+    <polygon points="112.5,496 107,485 118,485"/>
+    <polygon points="269.5,496 264,485 275,485"/>
+    <polygon points="426.5,496 421,485 432,485"/>
+    <polygon points="583.5,496 578,485 589,485"/>
+    <polygon points="740.5,496 735,485 746,485"/>
+    <polygon points="897.5,496 892,485 903,485"/>
+  </g>
+  <text class="tag lbl2" x="467" y="368">TOOLS</text>
+
+  <g text-anchor="middle">
+    <rect class="cap" x="40" y="496" width="145" height="76" rx="12" stroke-width="1.5"/>
+    <text class="cap-name t" x="112.5" y="524">Prompt</text>
+    <text class="tool m" x="112.5" y="543">prompt · cancel</text>
+    <text class="tool m" x="112.5" y="559">output</text>
+
+    <rect class="cap" x="197" y="496" width="145" height="76" rx="12" stroke-width="1.5"/>
+    <text class="cap-name t" x="269.5" y="524">Approvals</text>
+    <text class="tool m" x="269.5" y="543">approve · allow</text>
+    <text class="tool m" x="269.5" y="559">reject</text>
+
+    <rect class="cap" x="354" y="496" width="145" height="76" rx="12" stroke-width="1.5"/>
+    <text class="cap-name t" x="426.5" y="524">Questions</text>
+    <text class="tool m" x="426.5" y="543">answer</text>
+    <text class="tool m" x="426.5" y="559">accept · decline</text>
+
+    <rect class="cap" x="511" y="496" width="145" height="76" rx="12" stroke-width="1.5"/>
+    <text class="cap-name t" x="583.5" y="524">Snapshot</text>
+    <text class="tool m" x="583.5" y="543">status · progress</text>
+    <text class="tool m" x="583.5" y="559">snapshot</text>
+
+    <rect class="cap" x="668" y="496" width="145" height="76" rx="12" stroke-width="1.5"/>
+    <text class="cap-name t" x="740.5" y="524">Sessions</text>
+    <text class="tool m" x="740.5" y="543">open · close</text>
+    <text class="tool m" x="740.5" y="559">delete · sessions</text>
+
+    <rect class="cap" x="825" y="496" width="145" height="76" rx="12" stroke-width="1.5"/>
+    <text class="cap-name t" x="897.5" y="524">Config</text>
+    <text class="tool m" x="897.5" y="543">subagents</text>
+    <text class="tool m" x="897.5" y="559">set_config</text>
+  </g>
+
+  <!-- One request per cycle: main agent -> server -> split at the fork to every agent and the monitor -> reply -->
+  <g class="flows">
+    <g class="flow f-mcp r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-mcp-tail" d="M240 218 H320"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-mcp-mid" d="M240 218 H320"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-mcp-head" d="M240 218 H320"/></g>
+    <g class="flow f-mcp r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-mcp-tail" d="M240 218 H320"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-mcp-mid" d="M240 218 H320"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-mcp-head" d="M240 218 H320"/></g>
+    <g class="flow f-mcp r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-mcp-tail" d="M240 218 H320"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-mcp-mid" d="M240 218 H320"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-mcp-head" d="M240 218 H320"/></g>
+    <g class="flow f-mon r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-monitor-tail" d="M455 178 V135"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-monitor-mid" d="M455 178 V135"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-monitor-head" d="M455 178 V135"/></g>
+    <g class="flow f-mon r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-monitor-tail" d="M455 178 V135"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-monitor-mid" d="M455 178 V135"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-monitor-head" d="M455 178 V135"/></g>
+    <g class="flow f-mon r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-monitor-tail" d="M455 178 V135"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-monitor-mid" d="M455 178 V135"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-monitor-head" d="M455 178 V135"/></g>
+    <g class="flow f-acp r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-trunk-tail" d="M590 218 H650"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-trunk-mid" d="M590 218 H650"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-trunk-head" d="M590 218 H650"/></g>
+    <g class="flow f-acp r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-trunk-tail" d="M590 218 H650"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-trunk-mid" d="M590 218 H650"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-trunk-head" d="M590 218 H650"/></g>
+    <g class="flow f-acp r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-trunk-tail" d="M590 218 H650"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-trunk-mid" d="M590 218 H650"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-trunk-head" d="M590 218 H650"/></g>
+    <g class="flow f-acp r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-codex-tail" d="M650 218 V76 Q650 62 664 62 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-codex-mid" d="M650 218 V76 Q650 62 664 62 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-codex-head" d="M650 218 V76 Q650 62 664 62 H709"/></g>
+    <g class="flow f-acp r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-codex-tail" d="M650 218 V76 Q650 62 664 62 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-codex-mid" d="M650 218 V76 Q650 62 664 62 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-codex-head" d="M650 218 V76 Q650 62 664 62 H709"/></g>
+    <g class="flow f-acp r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-codex-tail" d="M650 218 V76 Q650 62 664 62 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-codex-mid" d="M650 218 V76 Q650 62 664 62 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-codex-head" d="M650 218 V76 Q650 62 664 62 H709"/></g>
+    <g class="flow f-acp r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-claude-tail" d="M650 218 V140 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-claude-mid" d="M650 218 V140 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-claude-head" d="M650 218 V140 H709"/></g>
+    <g class="flow f-acp r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-claude-tail" d="M650 218 V140 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-claude-mid" d="M650 218 V140 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-claude-head" d="M650 218 V140 H709"/></g>
+    <g class="flow f-acp r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-claude-tail" d="M650 218 V140 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-claude-mid" d="M650 218 V140 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-claude-head" d="M650 218 V140 H709"/></g>
+    <g class="flow f-acp r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-grok-tail" d="M650 218 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-grok-mid" d="M650 218 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-grok-head" d="M650 218 H709"/></g>
+    <g class="flow f-acp r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-grok-tail" d="M650 218 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-grok-mid" d="M650 218 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-grok-head" d="M650 218 H709"/></g>
+    <g class="flow f-acp r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-grok-tail" d="M650 218 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-grok-mid" d="M650 218 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-grok-head" d="M650 218 H709"/></g>
+    <g class="flow f-acp r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-opencode-tail" d="M650 218 V296 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-opencode-mid" d="M650 218 V296 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-opencode-head" d="M650 218 V296 H709"/></g>
+    <g class="flow f-acp r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-opencode-tail" d="M650 218 V296 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-opencode-mid" d="M650 218 V296 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-opencode-head" d="M650 218 V296 H709"/></g>
+    <g class="flow f-acp r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-opencode-tail" d="M650 218 V296 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-opencode-mid" d="M650 218 V296 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-opencode-head" d="M650 218 V296 H709"/></g>
+    <g class="flow f-acp r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-agy-tail" d="M650 218 V360 Q650 374 664 374 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-agy-mid" d="M650 218 V360 Q650 374 664 374 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-agy-head" d="M650 218 V360 Q650 374 664 374 H709"/></g>
+    <g class="flow f-acp r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-agy-tail" d="M650 218 V360 Q650 374 664 374 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-agy-mid" d="M650 218 V360 Q650 374 664 374 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-agy-head" d="M650 218 V360 Q650 374 664 374 H709"/></g>
+    <g class="flow f-acp r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-agy-tail" d="M650 218 V360 Q650 374 664 374 H709"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-agy-mid" d="M650 218 V360 Q650 374 664 374 H709"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-agy-head" d="M650 218 V360 Q650 374 664 374 H709"/></g>
+    <g class="flow f-mcp r0"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-reply-tail" d="M320 218 H240"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-reply-mid" d="M320 218 H240"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-reply-head" d="M320 218 H240"/></g>
+    <g class="flow f-mcp r1"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-reply-tail" d="M320 218 H240"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-reply-mid" d="M320 218 H240"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-reply-head" d="M320 218 H240"/></g>
+    <g class="flow f-mcp r2"><path class="tail" style="stroke-dasharray: 16 2000; animation-name: k-reply-tail" d="M320 218 H240"/><path class="mid" style="stroke-dasharray: 9 2000; animation-name: k-reply-mid" d="M320 218 H240"/><path class="head" style="stroke-dasharray: 4 2000; animation-name: k-reply-head" d="M320 218 H240"/></g>
+  </g>
+
+  <!-- Main agent -->
+  <rect class="main" x="40" y="183" width="190" height="70" rx="12" stroke-width="2"/>
+  <text class="name t" x="135" y="213" text-anchor="middle">Main agent</text>
+  <text class="sub m" x="135" y="234" text-anchor="middle">any MCP client</text>
+
+  <!-- MCP server -->
+  <rect class="mcp" x="330" y="178" width="250" height="80" rx="12" stroke-width="2"/>
+  <text class="code t" x="455" y="213" text-anchor="middle">subagent-cockpit-mcp</text>
+  <text class="sub m" x="455" y="236" text-anchor="middle">16 tools · a session per agent</text>
+
+  <!-- MCP server -> web UI monitor -->
+  <path class="edge" d="M455 178 V135" fill="none" stroke-width="1.75" stroke-dasharray="6 5"/>
+  <polygon class="head" points="455,124 449.5,135 460.5,135"/>
+  <text class="tag lbl2" x="467" y="160">ACTIVITY</text>
+  <rect class="mon" x="330" y="60" width="250" height="64" rx="12" stroke-width="1.75" stroke-dasharray="6 5"/>
+  <text class="name t" x="455" y="88" text-anchor="middle">Web UI monitor</text>
+  <text class="sub m" x="455" y="108" text-anchor="middle">127.0.0.1:7200 · read-only</text>
+
+  <!-- Codex -->
+  <rect class="box" x="720" y="30" width="250" height="64" rx="12" stroke-width="1.5"/>
+  <svg x="738" y="44" width="36" height="36" viewBox="0 0 20 20">
+    <path class="mono" d="M11.248 18.25q-.825 0-1.568-.314a4.3 4.3 0 0 1-1.32-.874 4 4 0 0 1-1.304.214 4 4 0 0 1-2.046-.544 4.27 4.27 0 0 1-1.518-1.485 4 4 0 0 1-.56-2.095q0-.48.131-1.04A4.4 4.4 0 0 1 2.04 10.71a4.07 4.07 0 0 1 .017-3.4 4.2 4.2 0 0 1 1.056-1.418 3.8 3.8 0 0 1 1.6-.842 3.9 3.9 0 0 1 .76-1.683q.593-.759 1.451-1.188a4.04 4.04 0 0 1 1.832-.429q.825 0 1.567.313.742.314 1.32.875a4 4 0 0 1 1.304-.215q1.106 0 2.046.545a4.14 4.14 0 0 1 1.501 1.485q.578.941.578 2.095 0 .48-.132 1.04.66.61 1.023 1.419.363.792.363 1.666 0 .892-.38 1.717a4.3 4.3 0 0 1-1.072 1.435 3.8 3.8 0 0 1-1.584.825 3.8 3.8 0 0 1-.775 1.683 4.06 4.06 0 0 1-1.436 1.188 4.04 4.04 0 0 1-1.832.429m-4.076-2.062q.825 0 1.435-.347l3.103-1.782a.36.36 0 0 0 .164-.313v-1.42L7.881 14.62a.67.67 0 0 1-.726 0l-3.118-1.798a.5.5 0 0 1-.017.115v.198q0 .841.396 1.551.413.693 1.139 1.089a3.2 3.2 0 0 0 1.617.412m.165-2.69a.4.4 0 0 0 .181.05q.083 0 .165-.05l1.238-.71-3.977-2.31a.7.7 0 0 1-.363-.643v-3.58q-.825.362-1.32 1.122a2.9 2.9 0 0 0-.495 1.65q0 .809.413 1.55.412.743 1.072 1.123zm3.91 3.663q.875 0 1.585-.396a2.96 2.96 0 0 0 1.534-2.64v-3.564a.32.32 0 0 0-.165-.297l-1.254-.726v4.604a.7.7 0 0 1-.363.643l-3.119 1.799a3 3 0 0 0 1.783.577m.627-6.039V8.878L10.01 7.822 8.129 8.878v2.244l1.881 1.056zM7.057 5.859a.7.7 0 0 1 .363-.644l3.119-1.798a3 3 0 0 0-1.782-.578q-.874 0-1.584.396A2.960 2.960 0 0 0 6.05 4.324a3.07 3.07 0 0 0-.396 1.551v3.547q0 .199.165.314l1.237.726zm8.383 7.887q.825-.364 1.303-1.123.495-.758.495-1.650a3.150 3.150 0 0 0-.412-1.55q-.413-.743-1.073-1.123l-3.086-1.782q-.099-.065-.181-.049a.3.3 0 0 0-.165.05l-1.238.692 3.993 2.327a.6.6 0 0 1 .264.264.64.64 0 0 1 .1.363zm-3.317-8.382a.63.63 0 0 1 .726 0l3.135 1.831v-.297q0-.792-.396-1.501a2.86 2.86 0 0 0-1.105-1.155q-.71-.43-1.65-.43-.825 0-1.436.347L8.294 5.941a.36.36 0 0 0-.165.314v1.418z"/>
+  </svg>
+  <text class="name t" x="790" y="59">Codex</text>
+  <text class="sub m" x="790" y="78">OpenAI · implement</text>
+
+  <!-- Claude Code -->
+  <rect class="box" x="720" y="108" width="250" height="64" rx="12" stroke-width="1.5"/>
+  <svg x="738" y="122" width="36" height="36" viewBox="0 0 24 24">
+    <path fill="#D97757" d="M21 10.5h3v3h-3v3h-1.5v3H18v-3h-1.5v3H15v-3H9v3H7.5v-3H6v3H4.5v-3H3v-3H0v-3h3v-6h18Zm-15 0h1.5v-3H6Zm10.5 0H18v-3h-1.5z"/>
+  </svg>
+  <text class="name t" x="790" y="137">Claude Code</text>
+  <text class="sub m" x="790" y="156">Anthropic · code review</text>
+
+  <!-- Grok Build -->
+  <rect class="box" x="720" y="186" width="250" height="64" rx="12" stroke-width="1.5"/>
+  <svg x="738" y="200" width="36" height="36" viewBox="40 40 432 432">
+    <path class="mono" d="M210.484 312.759L343.465 210.383C349.984 205.364 359.302 207.322 362.408 215.117C378.758 256.231 371.454 305.64 338.925 339.563C306.397 373.487 261.137 380.927 219.768 363.983L174.577 385.803C239.394 432.008 318.104 420.581 367.289 369.251C406.303 328.564 418.386 273.104 407.088 223.091L407.19 223.198C390.807 149.726 411.218 120.359 453.03 60.3072C454.02 58.8833 455.01 57.4595 456 56L400.978 113.382V113.204L210.45 312.794"/>
+    <path class="mono" d="M183.042 337.641C136.519 291.294 144.54 219.567 184.236 178.203C213.59 147.59 261.683 135.096 303.666 153.464L348.755 131.75C340.632 125.627 330.221 119.042 318.275 114.414C264.277 91.2407 199.63 102.774 155.735 148.516C113.513 192.549 100.236 260.254 123.036 318.027C140.069 361.206 112.148 391.748 84.0229 422.575C74.0561 433.503 64.0553 444.431 56 456L183.007 337.677"/>
+  </svg>
+  <text class="name t" x="790" y="215">Grok Build</text>
+  <text class="sub m" x="790" y="234">xAI · security review</text>
+
+  <!-- OpenCode -->
+  <rect class="box" x="720" y="264" width="250" height="64" rx="12" stroke-width="1.5"/>
+  <svg x="738" y="278" width="36" height="36" viewBox="-3 -3 30 30">
+    <path class="mono" d="M22 24H2V0h20zM17 4.8H7v14.4h10z"/>
+  </svg>
+  <text class="name t" x="790" y="293">OpenCode</text>
+  <text class="sub m" x="790" y="312">any model · run the tests</text>
+
+  <!-- Antigravity -->
+  <rect class="box" x="720" y="342" width="250" height="64" rx="12" stroke-width="1.5"/>
+  <svg x="738" y="356" width="36" height="36" viewBox="20 18 96 96">
+    <g transform="translate(12 10)">
+      <path d="M89.6992 93.695C94.3659 97.195 101.366 94.8617 94.9492 88.445C75.6992 69.7783 79.7825 18.445 55.8659 18.445C31.9492 18.445 36.0325 69.7783 16.7825 88.445C9.78251 95.445 17.3658 97.195 22.0325 93.695C40.1159 81.445 38.9492 59.8617 55.8659 59.8617C72.7825 59.8617 71.6159 81.445 89.6992 93.695Z" fill="#3186FF"/>
+      <mask id="ag_fav_m" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="13" y="18" width="85" height="78">
+        <path d="M89.6992 93.695C94.3659 97.195 101.366 94.8617 94.9492 88.445C75.6992 69.7783 79.7825 18.445 55.8659 18.445C31.9492 18.445 36.0325 69.7783 16.7825 88.445C9.78251 95.445 17.3658 97.195 22.0325 93.695C40.1159 81.445 38.9492 59.8617 55.8659 59.8617C72.7825 59.8617 71.6159 81.445 89.6992 93.695Z" fill="black"/>
+      </mask>
+      <g mask="url(#ag_fav_m)">
+        <g filter="url(#ag_fav_f0)"><ellipse cx="22.7873" cy="26.8098" rx="22.7873" ry="26.8098" transform="matrix(-0.112784 0.99362 -0.99362 -0.112781 66.2473 -15.5344)" fill="#FFE432"/></g>
+        <g filter="url(#ag_fav_f1)"><ellipse cx="96.491" cy="35.1231" rx="29.5007" ry="30.1492" transform="rotate(76.9243 96.491 35.1231)" fill="#FC413D"/></g>
+        <g filter="url(#ag_fav_f2)"><ellipse cx="9.02988" cy="41.6647" rx="30.832" ry="39.9417" transform="rotate(74.1257 9.02988 41.6647)" fill="#00B95C"/></g>
+        <g filter="url(#ag_fav_f3)"><ellipse cx="11.2212" cy="42.8915" rx="30.22" ry="33.2695" transform="rotate(45.6065 11.2212 42.8915)" fill="#00B95C"/></g>
+        <g filter="url(#ag_fav_f4)"><ellipse cx="75.7546" cy="104.822" rx="29.0177" ry="27.943" transform="rotate(76.9243 75.7546 104.822)" fill="#3186FF"/></g>
+        <g filter="url(#ag_fav_f5)"><ellipse cx="33.5661" cy="35.4043" rx="33.5661" ry="35.4043" transform="matrix(-0.409539 0.912293 -0.912294 -0.409537 101.25 -15.1674)" fill="#FBBC04"/></g>
+        <g filter="url(#ag_fav_f6)"><path d="M2.56802 149.695C-15.8116 142.48 15.5987 83.1163 23.4093 63.2203C31.22 43.3244 52.4514 33.0447 70.831 40.26C89.2107 47.4753 110.996 87.2162 103.185 107.112C95.3742 127.008 20.9477 156.91 2.56802 149.695Z" fill="#3186FF"/></g>
+        <g filter="url(#ag_fav_f7)"><path d="M113.934 75.8079C109.013 81.5509 96.1724 78.6224 85.253 69.2667C74.3335 59.911 69.4704 47.6711 74.391 41.928C79.3116 36.185 92.1525 39.1136 103.072 48.4692C113.991 57.8249 118.855 70.0648 113.934 75.8079Z" fill="#749BFF"/></g>
+        <g filter="url(#ag_fav_f8)"><ellipse cx="92.611" cy="23.7962" rx="44.2411" ry="27.5016" transform="rotate(34.0763 92.611 23.7962)" fill="#FC413D"/></g>
+        <g filter="url(#ag_fav_f9)"><ellipse cx="23.4949" cy="29.5887" rx="23.7071" ry="13.7869" transform="rotate(112.516 23.4949 29.5887)" fill="#FFEE48"/></g>
+      </g>
+    </g>
+  </svg>
+  <text class="name t" x="790" y="371">Antigravity</text>
+  <text class="sub m" x="790" y="390">Google · release notes</text>
+</svg>
