@@ -3,3 +3,24 @@
   font-size: inherit;
   line-height: inherit;
 }
+
+/*
+ * The conversation tab is monospace. Sarasa Mono SC and Noto Sans Mono CJK SC draw a CJK character exactly two
+ * Latin ones wide, so mixed text lines up once one is installed; without them CJK falls back to the system font.
+ */
+.cockpit-conversation {
+  --cockpit-conversation-font: 'Sarasa Mono SC', 'Noto Sans Mono CJK SC', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+  font-family: var(--cockpit-conversation-font);
+}
+
+/* antd's divider text is larger and heavier than the compact text; the turn summary reads like the rest */
+.cockpit-conversation .ant-divider-inner-text {
+  font-size: var(--ant-font-size, 12px);
+  font-weight: normal;
+}
+
+/* x-markdown's themes set their own code font */
+.cockpit-conversation .x-markdown pre,
+.cockpit-conversation .x-markdown code {
+  font-family: inherit;
+}

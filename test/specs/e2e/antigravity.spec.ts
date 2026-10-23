@@ -12,7 +12,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { childPids, clientToml, codexExec, COLOR_PROMPT, exists, openSession, promptIn, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
+import { childPids, clientToml, codexExec, COLOR_PROMPT, exists, openSession, promptIn, replayed, snapshotItems, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
 import type { Server } from '../../fixtures/e2e'
 import { isAlive, until } from '../../fixtures/harness'
 import type { ToolReply } from '../../fixtures/harness'
@@ -76,11 +76,6 @@ interface ConfigOption {
   options: Array<{ value: string }>
 }
 
-interface SnapshotSession {
-  session: string
-  events: Array<{ replay: boolean; type: string; text?: string; tool_call?: { title: string; kind: string | null; status: string | null } }>
-}
-
 async function makeEnv(): Promise<Env> {
   const root = await mkdtemp(join(tmpdir(), 'cockpit-e2e-agy-'))
   const dir = (name: string) => join(root, name)
@@ -113,7 +108,10 @@ test.describe('antigravity e2e', () => {
   const server = () => ctx.server ?? assert.fail('server not started')
   const page = () => ctx.watched?.page ?? assert.fail('page not open')
   const env = () => ctx.env ?? assert.fail('env not ready')
-  const snapshotOf = async (session: string) => ((await server().call('snapshot', {})).data.sessions as SnapshotSession[]).find(s => s.session === session)
+  /** Each tool item's title, kind and status, from the snapshot conversation */
+  const toolCalls = async (session: string) => (await snapshotItems(server(), session))
+    .filter(item => item.kind === 'tool')
+    .map(({ data }) => ({ title: data.title, kind: data.kind, status: data.status }))
 
   test.beforeAll(async ({ browser }) => {
     ctx.env = await makeEnv()
@@ -134,7 +132,7 @@ test.describe('antigravity e2e', () => {
     const r = await promptIn(server(), session, 'Read the file note.txt in the current directory and reply with its exact content only. Do not modify anything.')
     assert.equal(r.data.status, 'done', JSON.stringify(r.data))
     assert.match(String(r.data.output), new RegExp(NOTE))
-    const calls = (await snapshotOf(session))?.events.flatMap(e => (e.tool_call ? [e.tool_call] : [])) ?? []
+    const calls = await toolCalls(session)
     assert.ok(calls.some(c => c.kind === 'read'), JSON.stringify(calls))
     await expectAnsweredTurn(page(), 'antigravity', /Read the file note\.txt/, new RegExp(NOTE))
     const conversation = await showLatest(page(), 'antigravity')
@@ -147,7 +145,7 @@ test.describe('antigravity e2e', () => {
     const session = String((await openSession(server(), env().work, 'antigravity')).data.session)
     const r = await promptIn(server(), session, writePrompt('denied.txt'))
     diagnostic(`E59 output: ${JSON.stringify(r.data.output)}`)
-    const calls = (await snapshotOf(session))?.events.flatMap(e => (e.tool_call ? [e.tool_call] : [])) ?? []
+    const calls = await toolCalls(session)
     diagnostic(`E59 tool calls: ${JSON.stringify(calls)}`)
     assert.equal(r.data.status, 'done', JSON.stringify(r.data))
     assert.equal(await exists(join(env().work, 'denied.txt')), false)
@@ -212,7 +210,10 @@ test.describe('antigravity e2e', () => {
     await expect(sessionsOf(page(), 'antigravity').filter({ hasText: 'CLOSED' })).toHaveCount(1)
     const reopened = await server().call('open', { subagent: 'antigravity', cwd: env().work, session })
     assert.equal(reopened.isError, false, JSON.stringify(reopened.data))
-    assert.equal((await snapshotOf(session))?.events.some(e => e.replay), false)
+    // agy does not replay: no history outside a turn, and the turn before the close is still there
+    const items = await snapshotItems(server(), session)
+    assert.deepEqual(replayed(items), [])
+    assert.ok(items.some(item => item.kind === 'prompt' && JSON.stringify(item.data.prompt ?? null).includes(WORD)))
     const r = await promptIn(server(), session, 'Which word did I ask you to remember? Reply with the word only.')
     assert.match(String(r.data.output), new RegExp(WORD, 'i'))
   })

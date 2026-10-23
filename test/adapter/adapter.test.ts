@@ -6,7 +6,7 @@ import type * as acp from '@agentclientprotocol/sdk'
 import { loadConfig } from '../../src/config'
 import { SessionManager } from '../../src/session/session-manager'
 import type { SessionActivity } from '../../src/session/session-manager'
-import type { ConfigOptionInfo, OpenParams, ToolCallView } from '../../src/types'
+import type { ConfigOptionInfo, JsonValue, OpenParams, SnapshotItem } from '../../src/types'
 import { FAKE_VERSIONS, fakeProgram, isAlive, ofKind, recordActivity, setup, sleep, spawnServer, until } from '../fixtures/harness'
 import type { Harness, HarnessOptions } from '../fixtures/harness'
 import type { Step } from '../fixtures/scripted-acp-agent'
@@ -22,6 +22,12 @@ async function withHarness(opts: HarnessOptions, fn: (h: Harness) => Promise<voi
 
 const open = (h: Harness, extra: Partial<OpenParams> = {}) => h.manager.open({ subagent: 'agent', cwd: h.dir, ...extra })
 const userPrompts = async (h: Harness) => (await h.events('prompt')).filter(e => !String(e.text).startsWith('[subagent-cockpit]'))
+/** The session's conversation, as snapshot returns it */
+const items = (h: Harness, session: string) => h.store.items(session, undefined)
+/** Joined text of an item's content blocks */
+const textOf = (item: SnapshotItem | undefined) => (Array.isArray(item?.data.content) ? item.data.content : [])
+  .map((block: JsonValue) => (block && typeof block === 'object' && !Array.isArray(block) && typeof block.text === 'string' ? block.text : ''))
+  .join('')
 const childEnv = async (h: Harness) => (await h.events('start')).map(e => e.env)
 
 describe('prompt and output', () => {
@@ -211,7 +217,8 @@ describe('allow rules', () => {
     const done = await h.manager.respond('allow', session, r.approval?.approval_id ?? '', undefined, true)
     assert.equal(done.status, 'done')
     assert.deepEqual(await outcomes(h), [['touch a.txt', selected('allow_once')], ['touch b.txt', selected('allow_once')]])
-    assert.ok(h.manager.snapshot({}).sessions[0].events.some(e => e.type === 'auto_approved' && e.text === 'Run command'))
+    // The second request shows as an approval answered by the rule
+    assert.deepEqual(items(h, session).filter(i => i.kind === 'approval').map(i => i.data.resolution), ['allow', 'auto'])
   }))
 
   test('U103 a command outside the allowed prefix still asks', () => withHarness({ scripts: { agent: { turns: [[touch('touch a.txt'), touch('mkdir out', { prefix: 'mkdir' })]] } } }, async h => {
@@ -296,10 +303,11 @@ describe('cancel', () => {
     await until(() => h.manager.status(session).state === 'IDLE', 5000, 'IDLE')
     const next = await h.manager.prompt(session, 'next', true)
     assert.equal(next.output, 'done')
-    const events = h.manager.snapshot({}).sessions[0].events
-    const tails = events.filter(e => e.text === 't1' || e.text === 't2')
-    assert.equal(tails.length, 2)
-    assert.ok(tails.every(e => e.turn_id === first.turn_id))
+    const messages = items(h, session).filter(i => i.kind === 'message')
+    const tail = messages.find(i => textOf(i).includes('t1'))
+    assert.match(textOf(tail), /t1t2/)
+    assert.equal(tail?.turn_id, first.turn_id)
+    assert.equal(messages.find(i => textOf(i) === 'done')?.turn_id, next.turn_id)
   }))
 })
 
@@ -379,16 +387,6 @@ describe('config options', () => {
     await h.manager.setConfig(session, 'mode', 'read-only')
     assert.equal(h.manager.status(session).config.mode, 'read-only')
     assert.deepEqual((await h.events('set_config')).map(e => e.value), ['read-only'])
-  }))
-})
-
-describe('event buffer', () => {
-  test('U31 keeps the latest 500 events', () => withHarness({ scripts: { agent: { turns: [[{ chunks: 600 }]] } } }, async h => {
-    const { session } = await open(h)
-    await h.manager.prompt(session, 'go', true)
-    const { events } = h.manager.snapshot({}).sessions[0]
-    assert.equal(events.length, 500)
-    assert.equal(events.at(-1)?.text, 'c599;')
   }))
 })
 
@@ -838,8 +836,8 @@ describe('antigravity adapter', () => {
     await until(() => pids.every(p => !isAlive(p)), 5000, label)
   }
   const entriesOf = async (h: Harness, pid: unknown) => (await h.log()).filter(e => e.pid === pid).map(e => e.event)
-  const toolCalls = (h: Harness, session: string) => (h.manager.snapshot({}).sessions.find(s => s.session === session)?.events ?? [])
-    .reduce((calls, e) => (e.tool_call ? calls.set(e.tool_call.tool_call_id, e.tool_call) : calls), new Map<string, ToolCallView>())
+  /** Each tool item's data, merged from its tool_call and updates, by toolCallId */
+  const toolCalls = (h: Harness, session: string) => new Map(items(h, session).filter(i => i.kind === 'tool').map(i => [String(i.data.toolCallId), i.data]))
   // Wrapped in an object: an async function returning the promise itself would wait for the whole turn
   const startTurn = async (h: Harness, session: string, text: string) => {
     const pending = h.manager.prompt(session, text, true)
@@ -981,9 +979,10 @@ describe('antigravity adapter', () => {
     await open(h, { session })
     const runs = await agyRuns(h)
     assert.deepEqual(runs.at(-1)?.argv, [...STREAM_JSON, '--conversation', session.replace(/^antigravity_/, ''), '-p='])
-    const events = h.manager.snapshot({}).sessions.find(s => s.session === session)?.events ?? []
-    assert.equal(events.some(e => e.replay), false)
+    // Nothing replayed: no user_message items, and the turn before the close is still there
+    assert.equal(items(h, session).some(i => i.kind === 'user_message'), false)
     assert.equal((await h.manager.prompt(session, 'again', true)).status, 'done')
+    assert.deepEqual(items(h, session).filter(i => i.kind === 'prompt' && i.data.internal !== true).map(i => textOf({ ...i, data: { content: i.data.prompt ?? [] } })), ['hi', 'again'])
   }))
 
   test('U191 a conversation agy does not know is not found, on reconnect and on an internal restart', () => withHarness({
@@ -1109,7 +1108,8 @@ const FORM: acp.ElicitationSchema = {
 }
 
 const answers = async (h: Harness) => (await h.events('question')).map(e => e.response ?? { error: e.error })
-const eventTypes = (h: Harness, session: string) => h.manager.snapshot({}).sessions.find(s => s.session === session)?.events ?? []
+/** Question items: the form the agent sent, with the question_id when it entered the queue */
+const questionItems = (h: Harness, session: string) => items(h, session).filter(i => i.kind === 'question').map(i => [i.data.message, i.data.question_id ?? null])
 
 describe('questions', () => {
   // The sleep keeps the turn running after an answer, so a cancel always reaches it
@@ -1255,8 +1255,9 @@ describe('questions', () => {
     assert.equal(r.status, 'done')
     assert.equal(r.output, 'after')
     assert.deepEqual(await answers(h), [{ error: -32602 }])
-    assert.ok(eventTypes(h, session).some(e => e.type === 'question_declined' && e.text === 'Open this'))
-    assert.ok(!eventTypes(h, session).some(e => e.type === 'question'))
+    // The conversation shows the request and its error; it never got a question_id
+    assert.deepEqual(questionItems(h, session), [['Open this', null]])
+    assert.ok(items(h, session).some(i => i.kind === 'error' && i.data.method === 'elicitation/create'))
   }))
 
   test('U176 questions outside a turn are cancelled at once', () => withHarness({
@@ -1274,7 +1275,8 @@ describe('questions', () => {
     assert.deepEqual((await answers(h))[2], { action: 'cancel' })
     assert.equal(h.manager.status(session).state, 'IDLE')
     assert.equal(h.manager.status(session).questions.length, 0)
-    assert.ok(eventTypes(h, session).some(e => e.type === 'question_declined' && e.text === 'Late'))
+    // Setup questions come before session_opened releases the held activity, so all three show, none queued
+    assert.deepEqual(questionItems(h, session), [['Setup', null], ['Scoped', null], ['Late', null]])
   }))
 
   test('U182 two questions are handed out in arrival order', () => withHarness({
@@ -1302,7 +1304,7 @@ describe('questions', () => {
 describe('execution feedback', () => {
   const entry = (content: string, status: acp.PlanEntryStatus): acp.PlanEntry => ({ content, priority: 'medium', status, _meta: { extra: true } })
 
-  test('U171 plan keeps the latest list; each update is an event', () => withHarness({
+  test('U171 plan keeps the latest list; the conversation replaces its plan item in place', () => withHarness({
     scripts: {
       agent: {
         turns: [[
@@ -1318,7 +1320,8 @@ describe('execution feedback', () => {
       { content: 'a', priority: 'medium', status: 'completed' },
       { content: 'b', priority: 'medium', status: 'in_progress' },
     ])
-    assert.deepEqual(eventTypes(h, session).filter(e => e.type === 'plan').map(e => e.plan?.length), [3, 2])
+    const plans = items(h, session).filter(i => i.kind === 'plan')
+    assert.deepEqual(plans.map(i => Array.isArray(i.data.entries) ? i.data.entries.length : -1), [2])
     assert.ok(!('plan' in h.manager.status(session)))
   }))
 
@@ -1335,7 +1338,7 @@ describe('execution feedback', () => {
     const { session } = await open(h)
     await h.manager.prompt(session, 'go', true)
     assert.deepEqual(h.manager.progress(session).usage, { used: 9, size: 1000, cost: { amount: 0.5, currency: 'USD' } })
-    assert.ok(!eventTypes(h, session).some(e => e.type === 'usage_update'))
+    assert.ok(!items(h, session).some(i => i.data.sessionUpdate === 'usage_update'))
   }))
 
   test('U174 mode and command updates', () => withHarness({
@@ -1350,8 +1353,8 @@ describe('execution feedback', () => {
   }, async h => {
     const { session } = await open(h)
     await h.manager.prompt(session, 'go', true)
-    assert.ok(eventTypes(h, session).some(e => e.type === 'mode' && e.text === 'plan'))
-    assert.ok(eventTypes(h, session).some(e => e.type === 'commands'))
+    // Both are latest values for the session info, not conversation items
+    assert.ok(!items(h, session).some(i => i.data.sessionUpdate === 'current_mode_update' || i.data.sessionUpdate === 'available_commands_update'))
     assert.deepEqual(h.manager.progress(session).commands, [{ name: 'review', description: 'Review changes' }])
   }))
 })

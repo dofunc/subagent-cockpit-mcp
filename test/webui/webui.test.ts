@@ -69,8 +69,9 @@ interface WebuiProcess {
   kill(): void
 }
 
-function spawnWebui(port: number, graceMs: number, file = DIST_WEBUI): WebuiProcess {
-  const child = spawn(process.execPath, [file, '--port', String(port), '--grace-ms', String(graceMs)], { stdio: 'ignore' })
+/** dist/webui.js with the default message count; `extra` replaces it, e.g. [] to leave it out. */
+function spawnWebui(port: number, graceMs: number, file = DIST_WEBUI, extra = ['--max-message-count', '5000']): WebuiProcess {
+  const child = spawn(process.execPath, [file, '--port', String(port), '--grace-ms', String(graceMs), ...extra], { stdio: 'ignore' })
   const exited = new Promise<number | null>(resolve => child.once('exit', code => resolve(code)))
   return { pid: child.pid ?? 0, exited, kill: () => child.kill('SIGKILL') }
 }
@@ -356,11 +357,109 @@ describe('MCP servers and the webui', () => {
       assert.equal(truncated[0].method, 'session/prompt')
       assert.ok(truncated[0].bytes > 1048576)
       assert.ok(held.log.some(({ message }) => 'result' in message && message.result !== null && typeof message.result === 'object' && 'stopReason' in message.result))
+      // snapshot has its own default of the same 1 MB
+      const items: Array<{ kind: string; data: Record<string, unknown> }> = (await server.call('snapshot', { session })).data.sessions[0].items
+      const marker = items.find(item => item.kind === 'raw' && item.data.truncated === true)
+      assert.deepEqual([marker?.data.method, Number(marker?.data.bytes) > 1048576], ['session/prompt', true])
     } finally {
       await server.close()
       killWebuis(port)
     }
   }))
+
+  test('U248 the webui keeps webui.max_message_count messages, as passed by the server that starts it', { timeout: 60_000 }, () => withGrok({ scripts: { agent: { turns: [[{ chunks: 50 }]] } } }, async h => {
+    const port = await freePort()
+    const configPath = join(h.home, 'config.json')
+    const config = JSON.parse(await readFile(configPath, 'utf-8'))
+    await writeFile(configPath, JSON.stringify({ ...config, webui: { ...config.webui, max_message_count: 30 } }))
+    const server = await startServer(h.home, port)
+    try {
+      await webuiUp(port)
+      const [pid] = webuiPids(port)
+      assert.match(spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf-8' }).stdout, /--max-message-count 30(\s|$)/)
+      const session = await openSession(server, h)
+      await promptDone(server, session)
+      await until(async () => (await snapshot(port)).sessions[0]?.log.length === 30, 10_000, 'messages in')
+      const [held] = (await snapshot(port)).sessions
+      assert.equal(held.log.length, 30)
+      assert.equal('changes' in held, false)
+    } finally {
+      await server.close()
+      killWebuis(port)
+    }
+    // Without the count the webui does not start
+    const missing = spawnWebui(await freePort(), 1000, DIST_WEBUI, [])
+    assert.notEqual(await missing.exited, 0)
+  }))
+
+  test('U256 snapshot truncates by its own limit, apart from the webui', { timeout: 60_000 }, () => withGrok({ snapshot: { truncate_message_size: 2000 } }, async h => {
+    const port = await freePort()
+    const server = await startServer(h.home, port)
+    try {
+      await webuiUp(port)
+      await until(async () => (await snapshot(port)).mcps.length === 1, 10_000, 'connected')
+      const session = await openSession(server, h)
+      const text = 'y'.repeat(5000)
+      await promptDone(server, session, text)
+      const items: Array<{ kind: string; data: Record<string, unknown> }> = (await server.call('snapshot', { session })).data.sessions[0].items
+      const marker = items.find(item => item.kind === 'raw' && item.data.truncated === true)
+      assert.ok(marker && Number(marker.data.bytes) > 2000, JSON.stringify(items.map(i => i.kind)))
+      await until(async () => (await snapshot(port)).sessions[0]?.items.some(item => item.kind === 'turn') ?? false, 10_000, 'turn end')
+      const prompt = (await snapshot(port)).sessions[0].items.find(item => item.kind === 'prompt' && JSON.stringify(item.data.prompt ?? null).includes(text))
+      assert.ok(prompt, 'the webui has the full prompt')
+    } finally {
+      await server.close()
+      killWebuis(port)
+    }
+  }))
+
+  for (const adapter of ['antigravity', 'grok'] as const) {
+    test(`U261 ${adapter}: a reconnect with the same id goes on with the conversation the webui shows`, { timeout: 90_000 }, async () => {
+      const h = await setup({ adapter, scripts: { agent: adapter === 'grok' ? { replay: ['h1', 'h2'] } : {} } })
+      const port = await freePort()
+      const server = await startServer(h.home, port)
+      try {
+        await webuiUp(port)
+        // Connected before the session opens, so the webui hears every message
+        await until(async () => (await snapshot(port)).mcps.length === 1, 10_000, 'connected')
+        const session = await openSession(server, h)
+        await promptDone(server, session, 'one')
+        const first = (await server.call('snapshot', {})).data
+        await server.call('close', { session })
+        const closed = (await server.call('snapshot', {})).data
+        assert.deepEqual(closed.sessions, [])
+        assert.equal((await server.call('open', { subagent: 'agent', cwd: h.dir, session })).isError, false)
+        await promptDone(server, session, 'two')
+        type Item = { id: string; kind: string; turn_id: number | null; rev: number; at: number; data: Record<string, unknown> }
+        for (const since of [first, closed]) {
+          const back = (await server.call('snapshot', { since: since.seq, server_id: since.server_id })).data
+          assert.equal(back.reset, false)
+          const items: Item[] = back.sessions[0].items
+          assert.ok(items.every(item => item.rev > since.seq))
+          assert.ok(items.some(item => item.kind === 'prompt' && JSON.stringify(item.data.prompt ?? null).includes('one')))
+        }
+        const full: Item[] = (await server.call('snapshot', { session })).data.sessions[0].items
+        if (adapter === 'grok') {
+          const replayed = full.findIndex(item => item.kind === 'message' && item.turn_id === null)
+          const firstTurn = full.findIndex(item => item.kind === 'prompt' && JSON.stringify(item.data.prompt ?? null).includes('one'))
+          assert.ok(replayed > firstTurn && firstTurn >= 0, JSON.stringify(full.map(i => [i.kind, i.turn_id])))
+        }
+        // Timestamps come from each process's clock; everything else matches the webui item for item
+        const plain = (item: Record<string, unknown>) => {
+          const { at: _at, rev: _rev, log: _log, data, ...rest } = item
+          const { duration_ms: _duration, ...fields } = JSON.parse(JSON.stringify(data))
+          return { ...rest, data: fields }
+        }
+        await until(async () => (await snapshot(port)).sessions.find(s => s.session === session)?.items.length === full.length, 10_000, 'webui caught up')
+        const shown = (await snapshot(port)).sessions.find(s => s.session === session)?.items ?? []
+        assert.deepEqual(shown.map(plain), full.map(plain))
+      } finally {
+        await server.close()
+        killWebuis(port)
+        await h.cleanup()
+      }
+    })
+  }
 
   test('U220 test launches never reach the webui named by the inherited environment', { timeout: 60_000 }, () => withGrok({}, async h => {
     const port = await freePort()

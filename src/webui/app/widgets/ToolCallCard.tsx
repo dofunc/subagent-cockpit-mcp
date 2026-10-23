@@ -23,12 +23,12 @@ function FoldedText({ content }: { content: string }) {
   const [open, setOpen] = useState(false)
   const lines = content.replace(/\n+$/, '').split('\n')
   const textLines = lines.flatMap((line, index) => (isFence(line) || line.trim() === '' ? [] : [index]))
-  if (textLines.length <= FOLD_LINES + 1) return <Markdown content={content} breaks />
+  if (textLines.length <= FOLD_LINES + 1) return <Markdown content={content} />
   const head = lines.slice(0, textLines[FOLD_LINES - 1] + 1)
   const preview = head.filter(isFence).length % 2 === 1 ? [...head, '```'] : head
   return (
     <Flex vertical gap={4}>
-      <Markdown content={open ? content : preview.join('\n')} breaks />
+      <Markdown content={open ? content : preview.join('\n')} />
       <Typography.Link onClick={() => setOpen(!open)}>{open ? t('showLess') : t('moreLines', { count: textLines.length - FOLD_LINES })}</Typography.Link>
     </Flex>
   )
@@ -68,7 +68,7 @@ function ToolContent({ content }: { content: JsonValue }) {
   const fields = obj(content)
   const block = obj(fields.content)
   if (fields.type === 'content' && block.type === 'text') return <FoldedText content={text(block.text)} />
-  if (fields.type === 'content') return <ContentBlockView block={fields.content ?? null} breaks />
+  if (fields.type === 'content') return <ContentBlockView block={fields.content ?? null} />
   if (fields.type === 'diff') return <Diff fields={fields} />
   if (fields.type === 'terminal') return <Tag>{t('terminal', { id: text(fields.terminalId) })}</Tag>
   return <KeyValues value={content} />
@@ -91,6 +91,7 @@ function StatusIcon({ status }: { status: string }) {
  */
 export default function ToolCallCard({ item }: { item: ConversationItem }) {
   const { t } = usePreferences()
+  const { token } = theme.useToken()
   const { data } = item
   const status = text(data.status)
   const locations = list(data.locations).map(obj).map(l => (l.line === undefined || l.line === null ? text(l.path) : `${text(l.path)}:${text(l.line)}`))
@@ -101,8 +102,11 @@ export default function ToolCallCard({ item }: { item: ConversationItem }) {
   const terminal = contents.length === 0 ? text(data.terminal_output) : ''
   const label = (
     <Flex vertical gap={4}>
-      <Flex gap={8} align="center">
-        <StatusIcon status={status} />
+      {/* The icon sits on the title's first line when the title wraps */}
+      <Flex gap={8} align="flex-start">
+        <Flex align="center" style={{ height: token.fontSize * token.lineHeight }}>
+          <StatusIcon status={status} />
+        </Flex>
         <Typography.Text strong>{text(data.title) || text(data.toolCallId)}</Typography.Text>
       </Flex>
       <Flex gap={6} wrap>

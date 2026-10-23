@@ -12,7 +12,7 @@ import { NodeHost } from '../../src/host/node-host'
 import { SessionManager } from '../../src/session/session-manager'
 import type { SessionActivity } from '../../src/session/session-manager'
 import type { OpenParams } from '../../src/types'
-import { isAlive, recordActivity, setup, sleep, SlowWriteHost, spawnServer, until } from '../fixtures/harness'
+import { isAlive, ofKind, recordActivity, setup, sleep, SlowWriteHost, spawnServer, until } from '../fixtures/harness'
 import type { Harness, HarnessOptions } from '../fixtures/harness'
 import type { Script, Step } from '../fixtures/scripted-acp-agent'
 
@@ -54,6 +54,50 @@ class FailingWriteHost extends NodeHost {
   }
 }
 
+/** NodeHost that keeps its log, runs a hook before chosen store calls and can fail chosen writes, for timing races in place. */
+class HookHost extends NodeHost {
+  readonly logs: string[] = []
+  /** Paths renamed into place (session.json writes) and removed, in order */
+  readonly ops: string[] = []
+  readonly store: Store
+  beforeExists?: (path: string) => Promise<void>
+  beforeRemove?: (path: string) => Promise<void>
+  failWrite?: (path: string) => boolean
+
+  constructor() {
+    super()
+    const base = new NodeHost().store
+    this.store = {
+      ...base,
+      exists: async path => {
+        await this.beforeExists?.(path)
+        return base.exists(path)
+      },
+      writeText: async (path, data) => {
+        if (this.failWrite?.(path)) throw new Error('disk full')
+        await base.writeText(path, data)
+      },
+      rename: async (from, to) => {
+        await base.rename(from, to)
+        this.ops.push(`rename:${to}`)
+      },
+      remove: async path => {
+        await this.beforeRemove?.(path)
+        await base.remove(path)
+        this.ops.push(`remove:${path}`)
+      },
+    }
+    this.log = message => { this.logs.push(message) }
+  }
+}
+
+/** A promise and the function that settles it, to hold a hook until the test lets it go. */
+function gate(): { wait: Promise<void>; open: () => void } {
+  const control = { open: () => {} }
+  const wait = new Promise<void>(resolve => { control.open = resolve })
+  return { wait, open: () => control.open() }
+}
+
 describe('config', () => {
   test('U1 first load creates the default config', async () => {
     const home = await mkdtemp(join(tmpdir(), 'cockpit-config-'))
@@ -63,7 +107,7 @@ describe('config', () => {
       assert.equal('max_wait' in saved, false)
       assert.deepEqual(saved.idle, { timeout: 0 })
       assert.deepEqual(saved.webui, { port: 7200 })
-      assert.deepEqual(config.webui, { port: 7200 })
+      assert.deepEqual(config.webui, { port: 7200, truncate_message_size: 1048576, max_message_count: 5000 })
       assert.deepEqual(saved.profiles, {})
       assert.deepEqual(Object.keys(saved.subagents), ['codex', 'claude', 'grok', 'opencode', 'antigravity'])
       assert.deepEqual(Object.keys(saved.subagents).map(name => saved.subagents[name].adapter), ['codex', 'claude', 'grok', 'opencode', 'antigravity'])
@@ -84,6 +128,44 @@ describe('config', () => {
       const config = await loadConfig(new NodeHost(), home)
       assert.equal('max_wait' in config, false)
       assert.deepEqual(config.idle, { timeout: 60 })
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test('U243 the message limits default to 1 MB and 5000 and stay out of the first config file', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'cockpit-config-'))
+    try {
+      const config = await loadConfig(new NodeHost(), home)
+      const limits = { truncate_message_size: 1048576, max_message_count: 5000 }
+      assert.deepEqual(config.snapshot, limits)
+      assert.deepEqual(config.webui, { port: 7200, ...limits })
+      const saved = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'))
+      assert.equal('snapshot' in saved, false)
+      assert.deepEqual(saved.webui, { port: 7200 })
+      // An older file without them gets the defaults too
+      await writeFile(join(home, 'config.json'), JSON.stringify({ idle: { timeout: 0 } }))
+      assert.deepEqual((await loadConfig(new NodeHost(), home)).snapshot, limits)
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test('U244 a message limit that is not a positive integer fails the load, naming the field', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'cockpit-config-'))
+    try {
+      for (const section of ['snapshot', 'webui']) {
+        for (const field of ['truncate_message_size', 'max_message_count']) {
+          for (const value of [0, -1, 1.5, '1MB']) {
+            await writeFile(join(home, 'config.json'), JSON.stringify({ [section]: { [field]: value } }))
+            await assert.rejects(loadConfig(new NodeHost(), home), { message: new RegExp(`${section}\\.${field} must be a positive integer`) })
+          }
+          await writeFile(join(home, 'config.json'), JSON.stringify({ [section]: { [field]: 200 } }))
+          const { snapshot, webui } = await loadConfig(new NodeHost(), home)
+          const loaded: Record<string, Record<string, number>> = { snapshot, webui }
+          assert.equal(loaded[section][field], 200)
+        }
+      }
     } finally {
       await rm(home, { recursive: true, force: true })
     }
@@ -257,14 +339,17 @@ describe('reuse', () => {
     assert.equal(second.reused, true)
   }))
 
-  test('U35 reuse ignores CLOSED sessions on disk', () => withHarness({}, async h => {
-    const first = await open(h)
-    await h.manager.close(first.session)
-    const before = await readFile(join(sessionDir(h, first.session), 'session.json'), 'utf-8')
-    const second = await open(h, { reuse: true })
-    assert.notEqual(second.session, first.session)
-    assert.equal(second.reused, false)
-    assert.equal(await readFile(join(sessionDir(h, first.session), 'session.json'), 'utf-8'), before)
+  test('U35 reuse reconnects the latest CLOSED session on disk', () => withHarness({}, async h => {
+    const older = await open(h)
+    const newer = await open(h)
+    await h.manager.prompt(newer.session, 'later', true)
+    await h.manager.close()
+    const before = await readFile(join(sessionDir(h, older.session), 'session.json'), 'utf-8')
+    const loads = (await h.events('load')).length
+    const reused = await open(h, { reuse: true })
+    assert.deepEqual([reused.session, reused.reused, reused.reuse_skipped], [newer.session, true, undefined])
+    assert.equal((await h.events('load')).length, loads + 1)
+    assert.equal(await readFile(join(sessionDir(h, older.session), 'session.json'), 'utf-8'), before)
   }))
 
   test('U36 reuse without a candidate creates a session', () => withHarness({}, async h => {
@@ -382,16 +467,6 @@ describe('idle and listing', () => {
 })
 
 describe('snapshot', () => {
-  test('U32 since returns only newer events', () => withHarness({ scripts: { agent: { turns: [[{ chunk: 'a' }], [{ chunk: 'b' }]] } } }, async h => {
-    const { session } = await open(h)
-    await h.manager.prompt(session, 'one', true)
-    const first = h.manager.snapshot({})
-    await h.manager.prompt(session, 'two', true)
-    const next = h.manager.snapshot({ since: first.seq, server_id: first.server_id })
-    assert.equal(next.reset, false)
-    assert.deepEqual(next.sessions[0].events.filter(e => e.type === 'message').map(e => e.text), ['b'])
-  }))
-
   test('U33 snapshot shows a blocking call as waiting', () => withHarness({ scripts: { agent: { turns: [[{ sleep: 1000 }]] } } }, async h => {
     const { session } = await open(h)
     const pending = h.manager.prompt(session, 'go', true)
@@ -414,21 +489,6 @@ describe('snapshot', () => {
     await until(() => h.manager.status(session).state === 'IDLE', 5000, 'IDLE')
     const turns = h.manager.snapshot({}).sessions[0].notifications.map(n => n.turn_id)
     assert.ok(turns.includes(r.turn_id))
-  }))
-
-  test('U66 since older than the buffer resets with the current view', () => withHarness({ scripts: { agent: { turns: [[{ chunks: 600 }]] } } }, async h => {
-    const { session } = await open(h)
-    const before = h.manager.snapshot({})
-    await h.manager.prompt(session, 'go', true)
-    const next = h.manager.snapshot({ since: before.seq, server_id: before.server_id })
-    assert.equal(next.reset, true)
-    assert.match(next.sessions[0].view?.output ?? '', /^c0;c1;.*c599;$/)
-  }))
-
-  test('U67 another server_id resets', () => withHarness({}, async h => {
-    await open(h)
-    const first = h.manager.snapshot({})
-    assert.equal(h.manager.snapshot({ since: first.seq, server_id: 'other' }).reset, true)
   }))
 
   test('U78 a non-blocking approve does not deliver the turn', () => withHarness({ scripts: { agent: { turns: [[{ permission: {} }, { chunk: 'x' }]] } } }, async h => {
@@ -473,15 +533,14 @@ describe('snapshot', () => {
     assert.equal(new Set(all.map(([, t]) => t)).size, 3)
   }))
 
-  test('U82 replayed events are marked and produce no output or notification', () => withHarness({ scripts: { agent: { replay: ['h1', 'h2', 'h3'] } } }, async h => {
+  test('U82 replayed history is outside any turn and produces no output or notification', () => withHarness({ scripts: { agent: { replay: ['h1', 'h2', 'h3'] } } }, async h => {
     const { session } = await open(h)
     await h.manager.close(session)
     await open(h, { session })
-    const snap = h.manager.snapshot({}).sessions[0]
-    const replayed = snap.events.filter(e => e.replay)
-    assert.deepEqual(replayed.map(e => e.text), ['h1', 'h2', 'h3'])
+    const replayed = h.store.items(session, undefined).filter(i => i.kind === 'message' && i.turn_id === null)
+    assert.deepEqual(replayed.map(i => i.data.content), [[{ type: 'text', text: 'h1h2h3' }]])
     assert.equal(h.manager.output(session).output, '')
-    assert.equal(snap.notifications.length, 0)
+    assert.equal(h.manager.snapshot({}).sessions[0].notifications.length, 0)
   }))
 
   test('U97 with two approvals only the returned one is delivered', () => withHarness({ scripts: { agent: { turns: [[{ permissions: ['A', 'B'] }]] } } }, async h => {
@@ -760,7 +819,8 @@ describe('session titles', () => {
     assert.equal(h.manager.progress(session).title, null)
     await until(async () => (await h.manager.list())[0].title === '', 5000, 'title cleared')
     assert.equal((await savedRecord(h, session)).title, '')
-    assert.equal(h.manager.snapshot({}).sessions[0].events.filter(e => e.type === 'session_info').length, 2)
+    // The title is session info, not a conversation item
+    assert.ok(!h.store.items(session, undefined).some(i => i.data.sessionUpdate === 'session_info_update'))
   }))
 
   test('U178 a title sent while opening is persisted once the session is registered', () => withHarness({ scripts: { agent: { setup: [titleUpdate('Setup title')] } } }, async h => {
@@ -804,7 +864,8 @@ describe('session titles', () => {
     await until(async () => (await savedRecord(h, session)).title === '', 5000, 'title cleared')
     assert.equal((await h.manager.list())[0].title, '')
     await h.manager.prompt(session, 'three', true)
-    assert.equal(h.manager.snapshot({}).sessions[0].events.filter(e => e.type === 'session_info').length, 1)
+    assert.equal(h.manager.progress(session).title, null)
+    assert.equal((await savedRecord(h, session)).title, '')
   }))
 
   // Each write takes 1s: the prompt's last_prompt write ends near 1s and the title write near 2s.
@@ -1019,7 +1080,8 @@ describe('activity', () => {
     await h.manager.close(session)
     const before = seen.length
     assert.deepEqual(await h.manager.delete(session), { session, native: 'deleted' })
-    assert.equal(seen.length, before)
+    // Only the lifecycle: the temporary agent's ACP messages, state and turns never go out
+    assert.deepEqual(seen.slice(before), [{ session, activity: { kind: 'session_closed', reason: 'deleted' } }])
     const late: SessionActivity[] = []
     const unsubscribe = h.manager.onActivity(activity => late.push(activity))
     unsubscribe()
@@ -1027,5 +1089,451 @@ describe('activity', () => {
     await h.manager.prompt(reopened.session, 'go', true)
     assert.deepEqual(late, [])
     assert.ok(seen.length > before)
+  }))
+})
+
+const nativeOf = (session: string) => session.replace(/^codex_/, '')
+const loadsOf = async (h: Harness, session: string) => (await h.events('load')).filter(e => e.sessionId === nativeOf(session)).length
+
+describe('reuse of closed sessions on disk', () => {
+  test('U262 a failed reuse creates a new session and marks the old one', () => withHarness({}, async h => {
+    const { session: broken } = await open(h)
+    await h.manager.close(broken)
+    await h.setScript('agent', { errors: { load: true } })
+    const r = await open(h, { reuse: true })
+    assert.notEqual(r.session, broken)
+    assert.equal(r.reused, false)
+    assert.deepEqual([r.reuse_skipped?.session, r.reuse_skipped?.code], [broken, 'AGENT_ERROR'])
+    assert.equal((await savedRecord(h, broken)).reuse_failed?.code, 'AGENT_ERROR')
+    assert.equal(await exists(lockFile(h, broken)), false)
+    assert.equal(await loadsOf(h, broken), 1)
+  }))
+
+  test('U263 a marked session is not picked again', () => withHarness({}, async h => {
+    const { session: broken } = await open(h)
+    await h.manager.close(broken)
+    await h.setScript('agent', { errors: { load: true } })
+    const fresh = await open(h, { reuse: true })
+    await h.setScript('agent', {})
+    const again = await open(h, { reuse: true })
+    assert.deepEqual([again.session, again.reused], [fresh.session, true])
+    await h.manager.close(fresh.session)
+    const fromDisk = await open(h, { reuse: true })
+    assert.deepEqual([fromDisk.session, fromDisk.reused, fromDisk.reuse_skipped], [fresh.session, true, undefined])
+    assert.equal(await loadsOf(h, broken), 1)
+  }))
+
+  test('U264 a candidate taken by another process before the lock is not marked', () => withHarness({}, async h => {
+    const { session } = await open(h)
+    await h.manager.close(session)
+    const host = new HookHost()
+    const manager = new SessionManager(host, h.config, h.home)
+    const record = join(sessionDir(h, session), 'session.json')
+    host.beforeExists = async path => {
+      if (path !== record) return
+      host.beforeExists = undefined
+      await writeFile(lockFile(h, session), String(process.ppid))
+    }
+    try {
+      const r = await manager.open({ subagent: 'agent', cwd: h.dir, reuse: true })
+      assert.notEqual(r.session, session)
+      assert.equal(r.reuse_skipped?.code, 'SESSION_IN_USE')
+      assert.equal((await savedRecord(h, session)).reuse_failed, undefined)
+    } finally {
+      await rm(lockFile(h, session), { force: true })
+      await manager.shutdown()
+    }
+  }))
+
+  test('U265 an explicit reconnect clears the mark, and reuse may pick the session again', () => withHarness({ scripts: { agent: { delete: true } } }, async h => {
+    const { session: broken } = await open(h)
+    await h.manager.close(broken)
+    await h.setScript('agent', { delete: true, errors: { load: true } })
+    const fresh = await open(h, { reuse: true })
+    await h.setScript('agent', { delete: true })
+    await open(h, { session: broken })
+    await until(async () => (await savedRecord(h, broken)).reuse_failed === undefined, 5000, 'mark cleared')
+    await h.manager.close(broken)
+    await h.manager.delete(fresh.session)
+    const again = await open(h, { reuse: true })
+    assert.deepEqual([again.session, again.reused], [broken, true])
+  }))
+
+  test('U266 a session another process has open is skipped without a note', { timeout: 30_000 }, () => withHarness({}, async h => {
+    const a = await open(h)
+    const b = await open(h)
+    await h.manager.prompt(a.session, 'latest', true)
+    await h.manager.close()
+    const other = await spawnServer(h.home)
+    try {
+      assert.equal((await other.call('open', { subagent: 'agent', cwd: h.dir, session: a.session })).isError, false)
+      const r = await open(h, { reuse: true })
+      assert.deepEqual([r.session, r.reused, r.reuse_skipped], [b.session, true, undefined])
+    } finally {
+      await other.close()
+    }
+  }))
+
+  test('U269 a candidate deleted after it was picked: a new session, nothing written to the deleted directory', () => withHarness({}, async h => {
+    const { session } = await open(h)
+    await h.manager.close(session)
+    const host = new HookHost()
+    const manager = new SessionManager(host, h.config, h.home)
+    const record = join(sessionDir(h, session), 'session.json')
+    host.beforeExists = async path => {
+      if (path !== record) return
+      host.beforeExists = undefined
+      await rm(sessionDir(h, session), { recursive: true, force: true })
+    }
+    try {
+      const r = await manager.open({ subagent: 'agent', cwd: h.dir, reuse: true })
+      assert.notEqual(r.session, session)
+      assert.equal(r.reuse_skipped?.code, 'SESSION_NOT_FOUND')
+      assert.equal(await exists(sessionDir(h, session)), false)
+    } finally {
+      await manager.shutdown()
+    }
+  }))
+
+  test('U270 a mark that cannot be written is logged; the new session still opens and the lock goes', () => withHarness({}, async h => {
+    const { session: broken } = await open(h)
+    await h.manager.close(broken)
+    await h.setScript('agent', { errors: { load: true } })
+    const host = new HookHost()
+    host.failWrite = path => path.includes(broken)
+    const manager = new SessionManager(host, h.config, h.home)
+    try {
+      const r = await manager.open({ subagent: 'agent', cwd: h.dir, reuse: true })
+      assert.equal(r.reuse_skipped?.session, broken)
+      assert.ok(host.logs.some(l => new RegExp(`mark ${broken} reuse_failed failed`).test(l)), host.logs.join('\n'))
+      assert.equal(await exists(lockFile(h, broken)), false)
+    } finally {
+      await manager.shutdown()
+    }
+  }))
+
+  test('U271 the mark is written before the lock goes; another process reconnecting meanwhile waits for it', { timeout: 60_000 }, () => withHarness({}, async h => {
+    const { session: x } = await open(h)
+    await h.manager.close(x)
+    await h.setScript('agent', { errors: { load: true } })
+    const host = new HookHost()
+    const hold = gate()
+    const released = { at: -1 }
+    host.beforeRemove = async path => {
+      if (path !== lockFile(h, x)) return
+      await hold.wait
+      released.at = host.ops.length
+    }
+    const p1 = new SessionManager(host, h.config, h.home)
+    const p2 = await spawnServer(h.home)
+    try {
+      const reusing = p1.open({ subagent: 'agent', cwd: h.dir, reuse: true })
+      await until(async () => (await savedRecord(h, x)).reuse_failed !== undefined, 10_000, 'mark written')
+      assert.equal((await p2.call('open', { subagent: 'agent', cwd: h.dir, session: x })).data.code, 'SESSION_IN_USE')
+      await h.setScript('agent', {})
+      hold.open()
+      assert.equal((await reusing).reuse_skipped?.session, x)
+      assert.equal((await p2.call('open', { subagent: 'agent', cwd: h.dir, session: x })).isError, false)
+      assert.equal((await p2.call('set_config', { session: x, config_id: 'model', value: 'gpt-b' })).isError, false)
+      await until(async () => {
+        const record = await savedRecord(h, x)
+        return record.reuse_failed === undefined && record.config?.model === 'gpt-b'
+      }, 10_000, 'P2 state saved')
+      // Nothing of P1 lands on X once its lock is gone (the op at released.at is that removal)
+      assert.ok(host.ops.slice(released.at + 1).every(op => !op.includes(x)), host.ops.join('\n'))
+    } finally {
+      hold.open()
+      await p2.close()
+      await p1.shutdown()
+    }
+  }))
+
+  test('U267 no loop: each open tries one candidate, marks it on failure and creates a new session', () => withHarness({ scripts: { agent: { delete: true } } }, async h => {
+    const sessions = []
+    for (const _ of [1, 2, 3]) sessions.push((await open(h)).session)
+    await h.manager.close()
+    await h.setScript('agent', { delete: true, errors: { load: true } })
+    const tried: string[] = []
+    const created: string[] = []
+    for (const round of [0, 1, 2]) {
+      const r = await open(h, { reuse: true })
+      tried.push(r.reuse_skipped?.session ?? '')
+      created.push(r.session)
+      assert.equal((await h.events('load')).length, round + 1)
+      round < 2 && await h.manager.delete(r.session)
+    }
+    assert.deepEqual(tried, [...sessions].reverse())
+    const last = await open(h, { reuse: true })
+    assert.deepEqual([last.session, last.reused, last.reuse_skipped], [created[2], true, undefined])
+    assert.equal((await h.events('load')).length, 3)
+  }))
+})
+
+/** Resolves once the session was closed for idleness and its close finished (lock.pid gone). */
+async function idleClosed(h: Harness, seen: SessionActivity[], session: string): Promise<void> {
+  await until(() => seen.some(a => a.session === session && a.activity.kind === 'session_closed' && a.activity.reason === 'idle'), 8000, 'idle close')
+  await until(async () => !await exists(lockFile(h, session)), 5000, 'lock released')
+}
+
+const starts = async (h: Harness) => (await h.events('start')).length
+
+describe('reopening sessions closed for idleness', () => {
+  test('U275 prompt reopens an idle-closed session with its config', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const logs: string[] = []
+    h.host.log = message => { logs.push(message) }
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await h.manager.setConfig(session, 'reasoning_effort', 'high')
+    await until(async () => (await savedRecord(h, session)).config?.reasoning_effort === 'high', 5000, 'config saved')
+    await idleClosed(h, seen, session)
+    const r = await h.manager.prompt(session, 'again', true)
+    assert.equal(r.status, 'done')
+    assert.equal(await loadsOf(h, session), 1)
+    assert.deepEqual((await h.events('set_config')).map(e => [e.configId, e.value]), [['reasoning_effort', 'high'], ['reasoning_effort', 'high']])
+    assert.equal(h.manager.status(session).config.reasoning_effort, 'high')
+    assert.ok(ofKind(seen, 'session_opened').some(a => a.reconnected))
+    assert.ok(logs.some(l => l === `reopening idle-closed session ${session}`))
+  }))
+
+  test('U276 reads of an idle-closed session start no agent', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await h.manager.prompt(session, 'one', true)
+    const [progress, output] = [h.manager.progress(session), h.manager.output(session)]
+    await idleClosed(h, seen, session)
+    const before = await starts(h)
+    const status = h.manager.status(session)
+    assert.deepEqual([status.state, status.approvals, status.questions, status.waiting], ['CLOSED', [], [], false])
+    assert.deepEqual(status.config, { mode: 'auto', model: 'gpt-a', reasoning_effort: 'medium' })
+    assert.deepEqual(h.manager.progress(session), progress)
+    assert.deepEqual(h.manager.output(session), output)
+    assert.deepEqual(h.manager.cancel(session), { status: 'done' })
+    await assert.rejects(h.manager.respond('approve', session, 'ap_1', undefined, true), { code: 'INVALID_OPTION' })
+    assert.equal(await starts(h), before)
+  }))
+
+  test('U277 calls at once share one reconnect', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await idleClosed(h, seen, session)
+    const before = await starts(h)
+    const [prompted, configured] = await Promise.all([h.manager.prompt(session, 'go', false), h.manager.setConfig(session, 'model', 'gpt-b')])
+    assert.equal(prompted.status, 'running')
+    assert.equal(configured.find(o => o.id === 'model')?.current_value, 'gpt-b')
+    assert.equal(await starts(h), before + 1)
+    assert.equal(await loadsOf(h, session), 1)
+  }))
+
+  test('U278 a session closed by the caller is never reopened on its own', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const closed = await open(h)
+    await h.manager.close(closed.session)
+    await assert.rejects(h.manager.prompt(closed.session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+    const idle = await open(h)
+    await idleClosed(h, seen, idle.session)
+    const before = await starts(h)
+    assert.deepEqual(await h.manager.close(idle.session), { closed: [idle.session] })
+    await assert.rejects(h.manager.prompt(idle.session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+    assert.equal(await starts(h), before)
+  }))
+
+  test('U279 a failed reopen reports its error and tries again on the next call', { timeout: 60_000 }, () => withHarness({ idle: { timeout: 2 }, scripts: { agent: { delete: true } } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await idleClosed(h, seen, session)
+    const other = await spawnServer(h.home)
+    try {
+      assert.equal((await other.call('open', { subagent: 'agent', cwd: h.dir, session })).isError, false)
+      await assert.rejects(h.manager.prompt(session, 'go', true), { code: 'SESSION_IN_USE' })
+      assert.equal(h.manager.status(session).state, 'CLOSED')
+      await other.call('close', { session })
+      assert.equal((await h.manager.prompt(session, 'go', true)).status, 'done')
+      await h.manager.delete(session)
+      assert.throws(() => h.manager.status(session), { code: 'SESSION_NOT_FOUND' })
+    } finally {
+      await other.close()
+    }
+  }))
+
+  test('U280 an explicit reconnect ends the automatic one', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await idleClosed(h, seen, session)
+    await open(h, { session })
+    await h.manager.close(session)
+    await assert.rejects(h.manager.prompt(session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+  }))
+
+  test('U281 the old agent is gone and the lock released before the new one starts', { timeout: 60_000 }, () => withHarness({ idle: { timeout: 2 }, scripts: { agent: { delays: { exit: 2000 } } } }, async h => {
+    const logs: string[] = []
+    h.host.log = message => { logs.push(message) }
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    const [old] = await h.events('start')
+    await until(() => logs.includes(`closing idle session ${session}`), 8000, 'idle close starts')
+    const prompting = h.manager.prompt(session, 'go', true)
+    await until(async () => (await starts(h)) === 2, 10_000, 'new agent')
+    assert.equal(isAlive(Number(old.pid)), false)
+    assert.equal((await prompting).status, 'done')
+    const order = seen.filter(a => a.session === session).map(a => a.activity.kind).filter(k => k === 'session_closed' || k === 'session_opened')
+    assert.deepEqual(order, ['session_opened', 'session_closed', 'session_opened'])
+    assert.equal(await readFile(lockFile(h, session), 'utf-8'), String(process.pid))
+    const other = await spawnServer(h.home)
+    try {
+      assert.equal((await other.call('open', { subagent: 'agent', cwd: h.dir, session })).data.code, 'SESSION_IN_USE')
+    } finally {
+      await other.close()
+    }
+  }))
+
+  test('U282 calls wait for the config restore; idle checks and reuse leave a restoring session alone', { timeout: 60_000 }, () => withHarness({ idle: { timeout: 1 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await h.manager.setConfig(session, 'reasoning_effort', 'high')
+    await until(async () => (await savedRecord(h, session)).config?.reasoning_effort === 'high', 5000, 'config saved')
+    await idleClosed(h, seen, session)
+    const idleCloses = () => seen.filter(a => a.session === session && a.activity.kind === 'session_closed').length
+    const closesBefore = idleCloses()
+    const configRequests = async () => (await h.events('set_config')).length
+    /** Hold the restore at the agent, then let later set_config calls through at once */
+    const holdRestore = async () => {
+      const sent = await configRequests()
+      await h.setScript('agent', { delays: { setConfig: 2500 } })
+      return async () => {
+        await until(async () => (await configRequests()) > sent, 10_000, 'restore sent')
+        await h.setScript('agent', {})
+      }
+    }
+
+    const release = await holdRestore()
+    const setting = h.manager.setConfig(session, 'mode', 'read-only')
+    await until(() => ofKind(seen, 'session_opened').filter(a => a.reconnected).length === 1, 10_000, 'reconnected')
+    await release()
+    const prompting = h.manager.prompt(session, 'go', true)
+    const other = await open(h, { reuse: true })
+    assert.notEqual(other.session, session)
+    assert.equal((await prompting).status, 'done')
+    await setting
+    // Spans at least two idle checks (one a second), and none closed the session while it restored
+    assert.equal(idleCloses(), closesBefore)
+    const log = (await h.log()).filter(e => e.event === 'set_config_done' || (e.event === 'prompt' && e.text === 'go'))
+    const restored = log.findIndex(e => e.event === 'set_config_done' && e.configId === 'reasoning_effort')
+    assert.ok(restored >= 0 && restored < log.findIndex(e => e.event === 'prompt'), JSON.stringify(log))
+    assert.equal(await loadsOf(h, session), 1)
+
+    // A set_config that arrives while the restore is still out wins over it
+    await until(() => idleCloses() > closesBefore, 8000, 'idle again')
+    await until(async () => !await exists(lockFile(h, session)), 5000, 'lock released')
+    const releaseAgain = await holdRestore()
+    const reopening = h.manager.setConfig(session, 'model', 'gpt-a')
+    await until(() => ofKind(seen, 'session_opened').filter(a => a.reconnected).length === 2, 10_000, 'reconnected again')
+    await releaseAgain()
+    await h.manager.setConfig(session, 'reasoning_effort', 'low')
+    await reopening
+    assert.equal(h.manager.status(session).config.reasoning_effort, 'low')
+  }))
+
+  test('U283 close during a reopen undoes it; close() withdraws every idle-closed session', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await idleClosed(h, seen, session)
+    await h.setScript('agent', { delays: { loadSession: 1500 } })
+    const waiting = h.manager.prompt(session, 'go', true)
+    await until(async () => (await loadsOf(h, session)) === 1, 5000, 'reopen started')
+    assert.deepEqual(await h.manager.close(session), { closed: [session] })
+    await assert.rejects(waiting, { code: 'SESSION_NOT_FOUND' })
+    const pids = (await h.events('start')).map(e => Number(e.pid))
+    await until(() => pids.every(pid => !isAlive(pid)), 5000, 'no agent left')
+    const before = await starts(h)
+    await assert.rejects(h.manager.prompt(session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+    await assert.rejects(h.manager.setConfig(session, 'model', 'x'), { code: 'SESSION_NOT_FOUND' })
+    assert.equal(await starts(h), before)
+
+    await h.setScript('agent', {})
+    const [a, b] = [await open(h), await open(h)]
+    await Promise.all([idleClosed(h, seen, a.session), idleClosed(h, seen, b.session)])
+    const result = await h.manager.close()
+    assert.deepEqual([...result.closed].sort(), [a.session, b.session].sort())
+    const after = await starts(h)
+    await assert.rejects(h.manager.prompt(a.session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+    await assert.rejects(h.manager.prompt(b.session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+    assert.equal(await starts(h), after)
+  }))
+
+  test('U285 a session deleted from outside is not reopened again', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await idleClosed(h, seen, session)
+    await rm(sessionDir(h, session), { recursive: true, force: true })
+    const before = await starts(h)
+    await assert.rejects(h.manager.prompt(session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+    assert.throws(() => h.manager.status(session), { code: 'SESSION_NOT_FOUND' })
+    await assert.rejects(h.manager.prompt(session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+    assert.equal(await starts(h), before)
+  }))
+
+  test('U286 a session reuse brought back, then lost to an agent exit, is not reopened on its own', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await idleClosed(h, seen, session)
+    const r = await open(h, { reuse: true })
+    assert.deepEqual([r.session, r.reused], [session, true])
+    const pid = Number((await h.events('start')).at(-1)?.pid)
+    process.kill(pid, 'SIGKILL')
+    await until(() => seen.some(a => a.session === session && a.activity.kind === 'session_closed' && a.activity.reason === 'exited'), 5000, 'exited')
+    const before = await starts(h)
+    assert.throws(() => h.manager.status(session), { code: 'SESSION_NOT_FOUND' })
+    await assert.rejects(h.manager.prompt(session, 'go', true), { code: 'SESSION_NOT_FOUND' })
+    await assert.rejects(h.manager.setConfig(session, 'model', 'x'), { code: 'SESSION_NOT_FOUND' })
+    assert.equal(await starts(h), before)
+  }))
+
+  test('U287 an agent exit after registration marks nothing; the other process keeps its state', { timeout: 60_000 }, () => withHarness({}, async h => {
+    const seen = recordActivity(h.manager)
+    const { session: x } = await open(h)
+    await h.manager.setConfig(x, 'reasoning_effort', 'high')
+    await until(async () => (await savedRecord(h, x)).config?.reasoning_effort === 'high', 5000, 'config saved')
+    await h.manager.close(x)
+    await h.setScript('agent', { delays: { setConfig: 3000 } })
+    const reusing = open(h, { reuse: true })
+    await until(() => ofKind(seen, 'session_opened').filter(a => a.reconnected).length === 1, 10_000, 'registered')
+    process.kill(Number((await h.events('start')).at(-1)?.pid), 'SIGKILL')
+    const r = await reusing
+    // The exit either fails open (reuse_skipped) or comes just after it returned X; nothing is marked either way
+    assert.ok(r.reuse_skipped ? r.reuse_skipped.session === x && r.reuse_skipped.code === 'SUBAGENT_EXITED' : r.session === x, JSON.stringify(r))
+    await until(() => seen.some(a => a.session === x && a.activity.kind === 'session_closed' && a.activity.reason === 'exited'), 5000, 'exited')
+    await until(async () => !await exists(lockFile(h, x)), 5000, 'lock released')
+    assert.equal((await savedRecord(h, x)).reuse_failed, undefined)
+    await h.setScript('agent', {})
+    const p2 = await spawnServer(h.home)
+    try {
+      assert.equal((await p2.call('open', { subagent: 'agent', cwd: h.dir, session: x })).isError, false)
+      assert.equal((await p2.call('set_config', { session: x, config_id: 'model', value: 'gpt-b' })).isError, false)
+      await until(async () => (await savedRecord(h, x)).config?.model === 'gpt-b', 5000, 'P2 config saved')
+      assert.equal((await savedRecord(h, x)).reuse_failed, undefined)
+    } finally {
+      await p2.close()
+    }
+  }))
+
+  test('U288 calls during a reuse reconnect share it and wait for the restore', () => withHarness({ idle: { timeout: 2 } }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await h.manager.setConfig(session, 'reasoning_effort', 'high')
+    await until(async () => (await savedRecord(h, session)).config?.reasoning_effort === 'high', 5000, 'config saved')
+    await idleClosed(h, seen, session)
+    await h.setScript('agent', { delays: { loadSession: 1000 } })
+    const before = await starts(h)
+    const reusing = open(h, { reuse: true })
+    await until(async () => (await loadsOf(h, session)) === 1, 5000, 'load started')
+    const [prompted, configured] = await Promise.all([h.manager.prompt(session, 'go', true), h.manager.setConfig(session, 'model', 'gpt-b'), reusing])
+    assert.equal(prompted.status, 'done')
+    assert.equal(configured.find(o => o.id === 'model')?.current_value, 'gpt-b')
+    assert.deepEqual([(await reusing).session, (await reusing).reused], [session, true])
+    assert.equal(await starts(h), before + 1)
+    assert.equal(await loadsOf(h, session), 1)
+    const log = (await h.log()).filter(e => e.event === 'set_config_done' || (e.event === 'prompt' && e.text === 'go'))
+    const restore = log.findIndex(e => e.event === 'set_config_done' && e.configId === 'reasoning_effort')
+    assert.ok(restore >= 0 && restore < log.findIndex(e => e.event === 'prompt'), JSON.stringify(log))
   }))
 })

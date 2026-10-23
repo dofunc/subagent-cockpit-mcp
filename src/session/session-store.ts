@@ -1,5 +1,5 @@
 import type { Host } from '../host/host'
-import type { ConfigValues } from '../types'
+import type { ConfigValues, ErrorCode } from '../types'
 
 export interface SessionRecord {
   subagent: string
@@ -12,6 +12,8 @@ export interface SessionRecord {
   title?: string
   /** Current value of each config option, as the session last had them; absent in records written before config was kept */
   config?: ConfigValues
+  /** A reconnect by reuse failed after taking lock.pid; reuse skips the session until a reconnect succeeds */
+  reuse_failed?: { at: string; code: ErrorCode }
 }
 
 export interface StoredSession {
@@ -130,6 +132,12 @@ export class SessionStore {
   /** Delete lock.pid only when it still names this process. */
   async releaseLock(id: string): Promise<void> {
     if (await this.lockOwner(id) === this.host.env.pid) await this.host.store.remove(this.lockPath(id))
+  }
+
+  /** True when lock.pid names a live process, this one included. */
+  async locked(id: string): Promise<boolean> {
+    const owner = await this.lockOwner(id)
+    return owner !== null && this.host.env.isAlive(owner)
   }
 
   /** True when lock.pid names a live process other than this one. */

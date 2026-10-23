@@ -43,7 +43,7 @@ class WebuiServer {
   private readonly hosts: string[]
   private exitTimer?: ReturnType<typeof setTimeout>
 
-  constructor(private readonly port: number, private readonly graceMs: number) {
+  constructor(private readonly port: number, private readonly graceMs: number, private readonly maxMessages: number) {
     this.hosts = [`127.0.0.1:${port}`, `localhost:${port}`]
   }
 
@@ -100,7 +100,9 @@ class WebuiServer {
   /** SSE: everything held so far as `init`, then each change as it happens. */
   private subscribe(req: IncomingMessage, res: ServerResponse): void {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
-    res.write(this.frame('init', { mcps: [...this.mcps.values()], sessions: [...this.sessions.values()] }))
+    // changes only says what the last activity did; the browser starts its own
+    const sessions = [...this.sessions.values()].map(({ changes: _changes, ...session }) => session)
+    res.write(this.frame('init', { mcps: [...this.mcps.values()], sessions, max_messages: this.maxMessages }))
     this.streams.add(res)
     req.on('close', () => this.streams.delete(res))
   }
@@ -148,7 +150,7 @@ class WebuiServer {
         const { session, at, activity } = message
         const key = `${mcpId}\n${session}`
         // Activity of a session this webui never saw open has nothing to attach to
-        const view = this.sessions.get(key) ?? (activity.kind === 'session_opened' ? createConversation(mcpId, session, activity) : undefined)
+        const view = this.sessions.get(key) ?? (activity.kind === 'session_opened' ? createConversation(mcpId, session, activity, this.maxMessages) : undefined)
         if (!view) return
         this.sessions.set(key, view)
         applyActivity(view, at, activity)
@@ -187,11 +189,12 @@ class WebuiServer {
   }
 }
 
-const { values } = parseArgs({ options: { port: { type: 'string' }, 'grace-ms': { type: 'string' } } })
+const { values } = parseArgs({ options: { port: { type: 'string' }, 'grace-ms': { type: 'string' }, 'max-message-count': { type: 'string' } } })
 const port = Number(values.port)
 const graceMs = Number(values['grace-ms'] ?? DEFAULT_GRACE_MS)
-if (!Number.isInteger(port) || port < 1 || port > 65535 || !Number.isFinite(graceMs) || graceMs < 0) {
-  process.stderr.write('usage: webui.js --port <1-65535> [--grace-ms <ms>]\n')
+const maxMessages = Number(values['max-message-count'])
+if (!Number.isInteger(port) || port < 1 || port > 65535 || !Number.isFinite(graceMs) || graceMs < 0 || !Number.isSafeInteger(maxMessages) || maxMessages < 1) {
+  process.stderr.write('usage: webui.js --port <1-65535> --max-message-count <n> [--grace-ms <ms>]\n')
   process.exit(1)
 }
-new WebuiServer(port, graceMs).start()
+new WebuiServer(port, graceMs, maxMessages).start()

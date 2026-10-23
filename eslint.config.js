@@ -13,17 +13,19 @@ const HOST_AGNOSTIC_PATTERNS = [
 
 // Session and adapter layers know nothing about the webui
 const NO_WEBUI_PATTERN = { regex: '^(\\.{1,2}/)+(.*/)?webui(/.*)?$', message: 'The session and adapter layers must not depend on webui.' }
+// The conversation store belongs to the MCP layer, above them
+const NO_MCP_LAYER_PATTERN = { regex: '^(\\.{1,2}/)+(.*/)?conversation-store$', message: 'The session and adapter layers must not depend on the MCP layer.' }
 
 // Modules outside src/webui that webui code must not reach; src/types.ts stays allowed
 // Relative imports at any depth (./, ../, ../../../ ...). no-restricted-imports matches the import
 // string as written, without resolving it, so the patterns cover every directory level of app/
 const NON_WEBUI_MODULES = [
   { regex: '^(\\.{1,2}/)+(.*/)?(session|adapter|host|bridge)(/.*)?$', message: 'webui code only shares src/types.ts with the MCP server.' },
-  { regex: '^(\\.{1,2}/)+(.*/)?(config|cli)$', message: 'webui code only shares src/types.ts with the MCP server.' },
+  { regex: '^(\\.{1,2}/)+(.*/)?(config|cli|conversation-store)$', message: 'webui code only shares src/types.ts with the MCP server.' },
   { regex: '^(\\.\\./)+server$', message: 'webui code must not import the MCP server.' },
 ]
-// link.ts and server.ts (webui or MCP), off limits to shared and browser code
-const WEBUI_PROCESS_MODULES = [{ regex: '^(\\.{1,2}/)+(.*/)?(link|server)$', message: 'Shared and browser code must not import link.ts or server.ts.' }]
+// link.ts, truncate.ts (MCP side, Node) and server.ts (webui or MCP), off limits to shared and browser code
+const WEBUI_PROCESS_MODULES = [{ regex: '^(\\.{1,2}/)+(.*/)?(link|server|truncate)$', message: 'Shared and browser code must not import link.ts, truncate.ts or server.ts.' }]
 
 export default [
   js.configs.recommended,
@@ -62,7 +64,7 @@ export default [
   {
     files: ['src/session/**', 'src/config.ts', 'src/host/host.ts'],
     rules: {
-      'no-restricted-imports': ['error', { patterns: [...HOST_AGNOSTIC_PATTERNS, NO_WEBUI_PATTERN] }],
+      'no-restricted-imports': ['error', { patterns: [...HOST_AGNOSTIC_PATTERNS, NO_WEBUI_PATTERN, NO_MCP_LAYER_PATTERN] }],
     },
   },
   {
@@ -73,6 +75,7 @@ export default [
           ...HOST_AGNOSTIC_PATTERNS,
           { group: ['**/session', '**/session/*'], message: 'The adapter layer must not depend on the session layer.' },
           NO_WEBUI_PATTERN,
+          NO_MCP_LAYER_PATTERN,
         ],
       }],
     },

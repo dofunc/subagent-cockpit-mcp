@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { approvalId, childPids, clientToml, codexExec, COLOR_PROMPT, exists, firstChoice, openSession, promptIn, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
+import { approvalId, childPids, clientToml, codexExec, COLOR_PROMPT, exists, firstChoice, itemText, openSession, promptIn, replayed, snapshotItems, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
 import type { Server } from '../../fixtures/e2e'
 import { isAlive, until } from '../../fixtures/harness'
 import type { ToolReply } from '../../fixtures/harness'
@@ -217,10 +217,8 @@ test.describe('grok e2e', () => {
     await expect(sessionsOf(page(), 'grok').filter({ hasText: 'CLOSED' })).toHaveCount(1)
     const reopened = await server().call('open', { subagent: 'grok', cwd: env().work, session })
     assert.equal(reopened.isError, false, JSON.stringify(reopened.data))
-    const snapshot = await server().call('snapshot', {})
-    const sessions = snapshot.data.sessions as Array<{ session: string; events: Array<{ replay: boolean; text?: string }> }>
-    const replayed = sessions.find(s => s.session === session)?.events.filter(e => e.replay) ?? []
-    assert.ok(replayed.some(e => new RegExp(NOTE).test(e.text ?? '')), 'replayed events should include the earlier reply')
+    const history = replayed(await snapshotItems(server(), session))
+    assert.ok(history.some(item => new RegExp(NOTE).test(itemText(item))), 'the replayed history should include the earlier reply')
     const r = await promptIn(server(), session, 'What was the content of note.txt you read earlier? Answer from memory, without reading it again.')
     assert.match(String(r.data.output), new RegExp(NOTE))
   })

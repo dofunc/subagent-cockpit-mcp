@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.0] - 2026-10-23
+
+### Changed
+
+- Breaking: `snapshot` returns each session's full conversation as `items`, the same items the Web UI shows (prompts, replies, thinking, tool calls with their input, output and diffs, plans, approvals, questions and agent-specific messages), each with the `rev` of its last change. `events` and `view` are gone, and `seq` now counts item revisions. New params: `session` for one session, `types` and `exclude_types` for item kinds, `last` for the last few items. Unknown kinds and a `last` below 1 are invalid params.
+- `open` with `reuse` also reconnects the latest closed session on disk with the same `cwd` and subagent. A session that fails to reconnect gets a new one instead, `reuse_skipped` says why, and the broken session is not picked again until an explicit reconnect works.
+- A session closed by `idle.timeout` comes back on its own at the next `prompt` or `set_config`, with its settings. Until then `status`, `progress` and `output` return what it had (`CLOSED`) instead of `SESSION_NOT_FOUND`. `close` and `delete` end that.
+- Web UI: turn dividers show how long the turn took, before the tokens. A turn still running when its session closes or its agent exits ends with a `closed` divider and the reason.
+- Web UI: the conversation tab is monospace, with Sarasa Mono SC or Noto Sans Mono CJK SC first, so Chinese lines up with Latin text when one of them is installed.
+- The Web UI drops conversation items together with the messages behind them, instead of keeping up to 5000 items apart.
+
+### Added
+
+- `snapshot.truncate_message_size`, `snapshot.max_message_count`, `webui.truncate_message_size` and `webui.max_message_count` in `config.json`: the message size (bytes) shown as a truncation marker above it, and the messages kept per session. Defaults 1048576 and 5000.
+
+### Fixed
+
+- A single newline in a reply, thought, plan or tool output now breaks the line in the Web UI, as in the terminal.
+- A tool's status icon sits on the first line of a title that wraps.
+- Deleting a session closed earlier, or a delete that fails on an open session, now tells the Web UI and `snapshot` that the session ended.
+
 ## [0.1.1] - 2026-10-23
 
 ### Changed

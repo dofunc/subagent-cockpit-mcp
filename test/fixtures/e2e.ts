@@ -6,8 +6,23 @@ import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import type { SnapshotItem, SnapshotResult } from '../../src/types'
 import { parseReply } from './harness'
 import type { ToolReply } from './harness'
+
+/** One session's conversation items, as snapshot returns them. */
+export async function snapshotItems(server: Server, session: string): Promise<SnapshotItem[]> {
+  const result: SnapshotResult = JSON.parse(JSON.stringify((await server.call('snapshot', { session })).data))
+  return result.sessions[0]?.items ?? []
+}
+
+/** Joined text of an item's content blocks. */
+export const itemText = (item: SnapshotItem): string => (Array.isArray(item.data.content) ? item.data.content : [])
+  .map(block => (block && typeof block === 'object' && !Array.isArray(block) && typeof block.text === 'string' ? block.text : ''))
+  .join('')
+
+/** The history a reconnect replayed: messages outside any turn. */
+export const replayed = (items: SnapshotItem[]): SnapshotItem[] => items.filter(item => (item.kind === 'message' || item.kind === 'user_message') && item.turn_id === null)
 
 export const DIST_CLI = fileURLToPath(new URL('../../dist/cli.js', import.meta.url))
 export const TURN_TIMEOUT = 600_000

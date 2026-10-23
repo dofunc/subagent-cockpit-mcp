@@ -4,7 +4,7 @@ import type { ChildProcess, Host } from '../host/host'
 import type {
   AgentState, AnswerAction, AnswerContent, ApprovalInfo, ApprovalResolution, CommandInfo, ConfigOptionInfo, ErrorCode,
   ConversationActivity, NativeDeleteResult, NotificationItem, PermissionOptionInfo, PermissionOptionKind, PlanEntryInfo,
-  PromptResult, QuestionInfo, SessionEvent, SessionView, SubagentConfig, ToolCallView, TurnOutcome, UsageInfo,
+  PromptResult, QuestionInfo, SubagentConfig, TurnOutcome, UsageInfo,
 } from '../types'
 
 // ── Errors ──
@@ -34,16 +34,10 @@ export function createAdapter(name: string, host: Host): SubagentAdapter {
 
 // ── Process-wide counters ──
 
-// Turn, approval and question ids and event seqs never repeat within one MCP server process,
+// Turn, approval and question ids never repeat within one MCP server process,
 // across sessions and across reconnects of the same session.
-const counters = { turn: 0, approval: 0, question: 0, seq: 0 }
+const counters = { turn: 0, approval: 0, question: 0 }
 
-/** Latest event seq issued in this process. */
-export function currentSeq(): number {
-  return counters.seq
-}
-
-const EVENT_LIMIT = 500
 const ESTABLISH_LIMIT_MS = 30_000
 const VERSION_LIMIT_MS = 10_000
 const CANCEL_CONFIRM_MS = 10_000
@@ -135,7 +129,6 @@ interface Turn {
   turn_id: number
   internal: boolean
   output: string
-  tool_calls: Map<string, ToolCallView>
   /** messageId of the last message chunk, when the agent sends one. */
   message_id: string | null
   /** A tool call arrived since the last message chunk. */
@@ -212,8 +205,6 @@ export abstract class SubagentAdapter {
   private cancellingValue = false
   private nativeIdValue = ''
   private configOptions: acp.SessionConfigOption[] = []
-  private readonly events: SessionEvent[] = []
-  private droppedSeq = 0
   private loading = false
   private bootstrapping = false
   private expectingExit = false
@@ -623,7 +614,7 @@ export abstract class SubagentAdapter {
   private startTurn(text: string, internal: boolean): number {
     const turnId = ++counters.turn
     this.stateValue = 'RUNNING'
-    this.currentTurn = { turn_id: turnId, internal, output: '', tool_calls: new Map(), message_id: null, tool_since_message: false }
+    this.currentTurn = { turn_id: turnId, internal, output: '', message_id: null, tool_since_message: false }
     this.emit({ kind: 'turn_started', turn_id: turnId, internal })
     this.connection().prompt({ sessionId: this.nativeIdValue, prompt: [{ type: 'text', text }] }).then(
       r => this.finishTurn(turnId, r.stopReason === 'cancelled' ? 'cancelled' : 'done'),
@@ -718,12 +709,9 @@ export abstract class SubagentAdapter {
     this.allowRules.push(rule)
     const covered = [...this.approvals.entries()].flatMap(([id, p]) => {
       const once = p.info.options.find(o => o.kind === 'allow_once')
-      return once && rule.matches(p.request) ? [{ id, title: p.info.title, optionId: once.option_id }] : []
+      return once && rule.matches(p.request) ? [{ id, optionId: once.option_id }] : []
     })
-    covered.forEach(({ id, title, optionId }) => {
-      this.pushEvent({ type: 'auto_approved', text: title })
-      this.answerApproval(id, { outcome: 'selected', optionId }, 'allow')
-    })
+    covered.forEach(({ id, optionId }) => this.answerApproval(id, { outcome: 'selected', optionId }, 'allow'))
   }
 
   /** Cancel the current turn. Pending approvals get `cancelled` and questions `cancel`, then session/cancel is sent. */
@@ -826,26 +814,7 @@ export abstract class SubagentAdapter {
     return sent ? this.nativeDeleteResult() : 'unsupported'
   }
 
-  // ── Snapshot ──
-
-  /** Events after `since` (all retained events when undefined). */
-  eventsSince(since?: number): SessionEvent[] {
-    return since === undefined ? [...this.events] : this.events.filter(e => e.seq > since)
-  }
-
-  /** True when events after `since` were dropped from the buffer. */
-  lostSince(since: number): boolean {
-    return this.droppedSeq > since
-  }
-
-  view(): SessionView {
-    const turn = this.currentTurn
-    return {
-      turn_id: turn?.turn_id ?? null,
-      output: turn?.output ?? '',
-      tool_calls: turn ? [...turn.tool_calls.values()] : [],
-    }
-  }
+  // ── Notifications ──
 
   /** Undelivered notifications, keyed `turn:<id>` / `approval:<id>` / `question:<id>`. */
   undelivered(): Array<{ id: string; item: Omit<NotificationItem, 'key'> }> {
@@ -1024,7 +993,6 @@ export abstract class SubagentAdapter {
     const once = this.allowRules.some(r => r.matches(params)) ? params.options.find(o => o.kind === 'allow_once') : undefined
     if (once) {
       this.emit({ kind: 'auto_approved', tool_call_id: params.toolCall.toolCallId, option_id: once.optionId })
-      this.pushEvent({ type: 'auto_approved', text: params.toolCall.title ?? '' })
       this.notify()
       return Promise.resolve({ outcome: { outcome: 'selected', optionId: once.optionId } })
     }
@@ -1042,7 +1010,6 @@ export abstract class SubagentAdapter {
       this.notices.set(`approval:${approvalId}`, { item: { type: 'approval', approval: info }, delivered: false })
       this.emit({ kind: 'approval', approval_id: approvalId, tool_call_id: toolCall.toolCallId })
       this.refreshPendingState()
-      this.pushEvent({ type: 'approval', text: info.title })
       this.notify()
     })
   }
@@ -1050,16 +1017,12 @@ export abstract class SubagentAdapter {
   private onQuestion(params: acp.CreateElicitationRequest): Promise<acp.CreateElicitationResponse> {
     // Only form mode is advertised; ACP answers any other mode with Invalid params
     if (params.mode !== 'form' || !('requestedSchema' in params)) {
-      this.declineQuestion(params.message)
       return Promise.reject(RequestError.invalidParams(undefined, `Unsupported elicitation mode: ${params.mode}`))
     }
     // Only a running turn has a registered session the caller can answer through. Request-scoped
     // questions, and questions while opening, idle or closed, would wait for nobody.
     const inTurn = this.stateValue === 'RUNNING' || this.stateValue === 'ASKING' || this.stateValue === 'QUESTIONING'
-    if (!inTurn || !('sessionId' in params)) {
-      this.declineQuestion(params.message)
-      return Promise.resolve({ action: 'cancel' })
-    }
+    if (!inTurn || !('sessionId' in params)) return Promise.resolve({ action: 'cancel' })
     const questionId = `qu_${++counters.question}`
     const info: QuestionInfo = {
       question_id: questionId,
@@ -1073,55 +1036,31 @@ export abstract class SubagentAdapter {
       this.notices.set(`question:${questionId}`, { item: { type: 'question', question: info }, delivered: false })
       this.emit({ kind: 'question', question_id: questionId })
       this.refreshPendingState()
-      this.pushEvent({ type: 'question', text: info.message })
       this.notify()
     })
   }
 
-  /** A question that never enters the queue leaves only an event behind. */
-  private declineQuestion(message: string): void {
-    this.pushEvent({ type: 'question_declined', text: message })
-    this.notify()
-  }
-
+  /**
+   * Keep what output, the blocking results and progress need: the turn's reply, the latest feedback and the
+   * config. The full conversation comes from the activity mirror, merged in the MCP layer.
+   */
   private onUpdate(update: acp.SessionUpdate): void {
     const turn = this.loading ? undefined : this.currentTurn
     switch (update.sessionUpdate) {
       case 'agent_message_chunk': {
         const text = textOf(update.content)
         if (turn && text) appendMessage(turn, text, update.messageId ?? null)
-        this.pushEvent({ type: 'message', text })
         break
       }
-      case 'agent_thought_chunk':
-        this.pushEvent({ type: 'thought', text: textOf(update.content) })
-        break
-      case 'user_message_chunk':
-        this.pushEvent({ type: 'user_message', text: textOf(update.content) })
-        break
       case 'tool_call':
-      case 'tool_call_update': {
-        const previous = turn?.tool_calls.get(update.toolCallId)
-        const view: ToolCallView = {
-          tool_call_id: update.toolCallId,
-          title: update.title ?? previous?.title ?? '',
-          kind: update.kind ?? previous?.kind ?? null,
-          status: update.status ?? previous?.status ?? null,
-        }
-        if (turn) {
-          turn.tool_calls.set(update.toolCallId, view)
-          turn.tool_since_message = true
-        }
-        this.pushEvent({ type: update.sessionUpdate, tool_call: view })
+      case 'tool_call_update':
+        if (turn) turn.tool_since_message = true
         break
-      }
       case 'config_option_update':
         this.replaceConfigOptions(update.configOptions)
-        this.pushEvent({ type: 'config' })
         break
       case 'plan':
         this.feedback.plan = update.entries.map(({ content, priority, status }) => ({ content, priority, status }))
-        this.pushEvent({ type: 'plan', plan: this.feedback.plan })
         break
       case 'usage_update':
         // Sent around every tool call by Claude: kept as the latest value, never as an event
@@ -1134,27 +1073,13 @@ export abstract class SubagentAdapter {
         if (this.titleReceived && update.title === this.feedback.title) break
         this.titleReceived = true
         this.feedback.title = update.title
-        this.pushEvent({ type: 'session_info', text: update.title ?? '' })
         this.titleListeners.forEach(l => l(update.title ?? null))
-        break
-      case 'current_mode_update':
-        this.pushEvent({ type: 'mode', text: update.currentModeId })
         break
       case 'available_commands_update':
         this.feedback.commands = update.availableCommands.map(({ name, description }) => ({ name, description }))
-        this.pushEvent({ type: 'commands' })
         break
-      default:
-        this.pushEvent({ type: update.sessionUpdate })
     }
     this.notify()
-  }
-
-  private pushEvent(event: Omit<SessionEvent, 'seq' | 'turn_id' | 'replay'>): void {
-    const replay = this.loading
-    this.events.push({ seq: ++counters.seq, turn_id: replay ? null : this.currentTurn?.turn_id ?? null, replay, ...event })
-    const overflow = this.events.length - EVENT_LIMIT
-    if (overflow > 0) this.droppedSeq = this.events.splice(0, overflow)[overflow - 1].seq
   }
 
   // ── Helpers ──

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { approvalId, childPids, clientToml, codexExec, COLOR_PROMPT, exists, firstChoice, openSession, promptIn, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
+import { approvalId, childPids, clientToml, codexExec, COLOR_PROMPT, exists, firstChoice, itemText, openSession, promptIn, replayed, snapshotItems, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
 import type { Server } from '../../fixtures/e2e'
 import { isAlive, until } from '../../fixtures/harness'
 import type { ToolReply } from '../../fixtures/harness'
@@ -175,10 +175,8 @@ test.describe('claude e2e', () => {
     await expect(sessionsOf(page(), 'claude').filter({ hasText: 'CLOSED' })).toHaveCount(1)
     const reopened = await server().call('open', { subagent: 'claude', cwd: env().work, session })
     assert.equal(reopened.isError, false, JSON.stringify(reopened.data))
-    const snapshot = await server().call('snapshot', {})
-    const sessions = snapshot.data.sessions as Array<{ session: string; events: Array<{ replay: boolean; text?: string }> }>
-    const replayed = sessions.find(s => s.session === session)?.events.filter(e => e.replay) ?? []
-    assert.ok(replayed.some(e => /PONG/.test(e.text ?? '')), 'replayed events should include the earlier reply')
+    const history = replayed(await snapshotItems(server(), session))
+    assert.ok(history.some(item => /PONG/.test(itemText(item))), 'the replayed history should include the earlier reply')
     const r = await promptIn(server(), session, 'Which single word did you reply with earlier? Answer with just that word.')
     assert.match(String(r.data.output), /PONG/)
   })
@@ -249,16 +247,17 @@ test.describe('claude e2e', () => {
     assert.ok(((fed.usage as { size: number } | null)?.size ?? 0) > 0, JSON.stringify(fed.usage))
     assert.ok((fed.commands as unknown[]).length > 0)
     await server().call('set_config', { session, config_id: 'mode', value: 'plan' })
-    const events = async () => ((await server().call('snapshot', {})).data.sessions as Array<{ session: string; events: Array<{ type: string; text?: string }> }>)
-      .find(s => s.session === session)?.events ?? []
-    await until(async () => (await events()).some(e => e.type === 'mode'), 30_000, 'mode event')
+    // The mode change shows in the conversation as a config event and in the session's config
+    await until(async () => (await snapshotItems(server(), session)).some(item => item.kind === 'event' && item.data.configId === 'mode'), 30_000, 'mode event')
+    const status = (await server().call('status', { session })).data
+    assert.equal(JSON.parse(JSON.stringify(status.config)).mode, 'plan')
     // E70: the session tab lists the commands and fills the context bar
     await showLatest(page(), 'claude')
     await page().getByRole('tab', { name: 'Session' }).click()
     const info = page().getByRole('tabpanel', { name: 'Session' })
     await expect(info.getByText(/^\/\S+$/).first()).toBeVisible()
     await expect(info.getByRole('progressbar')).toBeVisible()
-    diagnostic(`E57 mode events: ${JSON.stringify((await events()).filter(e => e.type === 'mode'))}`)
+    diagnostic(`E57 mode events: ${JSON.stringify((await snapshotItems(server(), session)).filter(item => item.kind === 'event' && item.data.configId === 'mode'))}`)
   })
 })
 

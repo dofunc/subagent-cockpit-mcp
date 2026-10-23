@@ -4,18 +4,24 @@ import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } fr
 import type { CallToolRequest, CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js'
 import { CockpitError } from './adapter/adapter'
 import type { ApprovalVerb } from './adapter/adapter'
+import type { ConversationStore } from './conversation-store'
 import type { SessionManager } from './session/session-manager'
-import type { AnswerAction, AnswerContent } from './types'
+import type { AnswerAction, AnswerContent, ConversationItemKind, SnapshotItem, SnapshotResult } from './types'
 
 type Args = NonNullable<CallToolRequest['params']['arguments']>
 type Handler = (args: Args, signal: AbortSignal) => Promise<object> | object
 type JsonSchema = Record<string, unknown>
 
+/** One tool param. The same definition gives the inputSchema and the check checkArgs runs. */
 interface Param {
-  type: 'string' | 'boolean' | 'number' | 'array' | 'object'
+  type: 'string' | 'boolean' | 'number' | 'integer' | 'array' | 'object'
   description?: string
   /** Allowed values of a string param; anything else is Invalid params */
   enum?: string[]
+  /** Smallest allowed value of a number or integer param */
+  minimum?: number
+  /** Allowed values of an array param's elements, which are strings */
+  items?: { enum: string[] }
 }
 
 interface ToolSpec {
@@ -116,7 +122,29 @@ const ANSWER_ACTIONS: AnswerAction[] = ['accept', 'decline', 'cancel']
 
 const SESSION_STATE_KEYS = Object.keys(SESSION_STATE)
 
-const TOOL_CALL = object({ tool_call_id: str, title: str, kind: nullable('string'), status: nullable('string') })
+const ITEM_KINDS: ConversationItemKind[] = [
+  'prompt', 'message', 'thought', 'user_message', 'session_message', 'compaction',
+  'tool', 'plan', 'approval', 'question', 'notice', 'subagent', 'error', 'turn', 'event', 'raw',
+]
+
+const SNAPSHOT_ITEM = object({
+  id: str,
+  kind: oneOf(...ITEM_KINDS),
+  at: num,
+  turn_id: nullable('number'),
+  data: { type: 'object' },
+  rev: num,
+}, ['id', 'kind', 'at', 'turn_id', 'data', 'rev'])
+
+const ITEM_KIND_LIST: Param = { type: 'array', items: { enum: ITEM_KINDS }, description: `Conversation item kinds: ${ITEM_KINDS.join(', ')}` }
+
+const SNAPSHOT_DESCRIPTION = [
+  'Full conversation of open sessions, the same as the webui shows: prompts, replies, thinking, tool calls with',
+  'their input, output and diffs, plans, approvals, questions and agent-specific messages, plus each session\'s',
+  'state and pending notifications. It can be large: pass session, and use last, types or exclude_types to keep',
+  'it small. Pass back server_id and seq as since to get only what changed. ack is for UI clients that relay',
+  'notifications.',
+].join(' ')
 
 // ── Tools ──
 
@@ -143,7 +171,7 @@ const SPECS: ToolSpec[] = [
   },
   {
     name: 'open',
-    description: 'Open a session: reconnect when `session` is given, reuse this server\'s idle session with the same cwd and subagent when `reuse` is true, otherwise create one. Reconnecting puts back the config the session last had (the subagent config, or later set_config changes). Returns once the session is set up (role prompt included), with the session id and the full config_options. It takes no task: send tasks with `prompt`.',
+    description: 'Open a session: reconnect when `session` is given; with `reuse`, take this server\'s idle session with the same cwd and subagent, else reconnect the latest closed one on disk; otherwise create one. A reuse that cannot reconnect creates a new session and says why in reuse_skipped. Reconnecting puts back the config the session last had (the subagent config, or later set_config changes). Returns once the session is set up (role prompt included), with the session id and the full config_options. It takes no task: send tasks with `prompt`.',
     params: {
       subagent: { type: 'string' },
       cwd: { type: 'string', description: 'Working directory of the agent' },
@@ -152,12 +180,18 @@ const SPECS: ToolSpec[] = [
       role: { type: 'string', description: 'Identity for the session. Avoid imperative verbs.' },
     },
     required: ['subagent', 'cwd'],
-    output: object({ session: str, reused: bool, ...PROMPT_RESULT, config_options: CONFIG_OPTIONS }, ['session', 'reused', 'status', 'config_options']),
+    output: object({
+      session: str,
+      reused: bool,
+      ...PROMPT_RESULT,
+      config_options: CONFIG_OPTIONS,
+      reuse_skipped: object({ session: str, code: str, message: str }, ['session', 'code', 'message']),
+    }, ['session', 'reused', 'status', 'config_options']),
     blocking: true,
   },
   {
     name: 'prompt',
-    description: `Send a task to an IDLE session. In ASKING or QUESTIONING it returns the pending approval or question instead. ${BLOCKING_RULES}`,
+    description: `Send a task to an IDLE session. In ASKING or QUESTIONING it returns the pending approval or question instead. A session closed for idleness is reopened first. ${BLOCKING_RULES}`,
     params: { session, text: { type: 'string' }, wait },
     required: ['session', 'text'],
     output: object(PROMPT_RESULT, ['status']),
@@ -210,14 +244,14 @@ const SPECS: ToolSpec[] = [
   },
   {
     name: 'set_config',
-    description: 'Change a session config option (model, reasoning_effort, mode, ...). Returns the full config_options. Unknown ids or values fail with the available choices.',
+    description: 'Change a session config option (model, reasoning_effort, mode, ...). Returns the full config_options. Unknown ids or values fail with the available choices. A session closed for idleness is reopened first.',
     params: { session, config_id: { type: 'string' }, value: { type: 'string' } },
     required: ['session', 'config_id', 'value'],
     output: object({ config_options: CONFIG_OPTIONS }, ['config_options']),
   },
   {
     name: 'status',
-    description: 'Session state, cancelling flag, current config values, pending approvals and questions, and whether a blocking call is waiting. Cheap to call repeatedly; the config choices are in open, set_config and snapshot.',
+    description: 'Session state, cancelling flag, current config values, pending approvals and questions, and whether a blocking call is waiting. Cheap to call repeatedly; the config choices are in open, set_config and snapshot. A session closed for idleness reports CLOSED with its last values.',
     params: { session },
     required: ['session'],
     output: object({ ...SESSION_STATE, config: { type: 'object', additionalProperties: { type: ['string', 'boolean'] } } }, [...SESSION_STATE_KEYS, 'config']),
@@ -251,8 +285,16 @@ const SPECS: ToolSpec[] = [
   },
   {
     name: 'snapshot',
-    description: 'Incremental state of all sessions for UI clients. Pass back server_id and seq as since; ack lists notification keys already relayed.',
-    params: { since: { type: 'number' }, server_id: { type: 'string' }, ack: { type: 'array' } },
+    description: SNAPSHOT_DESCRIPTION,
+    params: {
+      session: { type: 'string', description: 'Only this session' },
+      since: { type: 'number', description: 'seq from the previous call: only items changed after it' },
+      server_id: { type: 'string', description: 'server_id from the previous call; a different one resets' },
+      ack: { type: 'array', description: 'Notification keys already relayed' },
+      types: { ...ITEM_KIND_LIST, description: 'Only these item kinds' },
+      exclude_types: { ...ITEM_KIND_LIST, description: 'Leave these item kinds out' },
+      last: { type: 'integer', minimum: 1, description: 'Only the last n items, after the kind filters' },
+    },
     output: object({
       server_id: str,
       seq: num,
@@ -264,9 +306,8 @@ const SPECS: ToolSpec[] = [
         notifications: list(object({
           key: str, type: oneOf('turn', 'approval', 'question'), turn_id: num, outcome: oneOf('done', 'cancelled', 'error'), approval: APPROVAL, question: QUESTION,
         }, ['key', 'type'])),
-        events: list(object({ seq: num, turn_id: nullable('number'), replay: bool, type: str, text: str, tool_call: TOOL_CALL, plan: PLAN }, ['seq', 'turn_id', 'replay', 'type'])),
-        view: object({ turn_id: nullable('number'), output: str, tool_calls: list(TOOL_CALL) }, ['turn_id', 'output', 'tool_calls']),
-      }, [...SESSION_STATE_KEYS, ...Object.keys(PROGRESS), 'config_options', 'notifications', 'events'])),
+        items: list(SNAPSHOT_ITEM),
+      }, [...SESSION_STATE_KEYS, ...Object.keys(PROGRESS), 'config_options', 'notifications', 'items'])),
     }, ['server_id', 'seq', 'reset', 'sessions']),
   },
 ]
@@ -274,7 +315,7 @@ const SPECS: ToolSpec[] = [
 function toTool(spec: ToolSpec): Tool {
   const properties = Object.fromEntries(Object.entries(spec.params).map(([key, param]) => [
     key,
-    param.type === 'array' ? { ...param, items: { type: 'string' } } : param,
+    param.type === 'array' ? { ...param, items: { type: 'string', ...param.items } } : param,
   ]))
   return {
     name: spec.name,
@@ -292,20 +333,31 @@ const SPEC_BY_NAME = new Map(SPECS.map(s => [s.name, s]))
 function matches(param: Param, value: unknown): boolean {
   if (param.type === 'array') return Array.isArray(value) && value.every(v => typeof v === 'string')
   if (param.type === 'object') return typeof value === 'object' && value !== null && !Array.isArray(value)
+  if (param.type === 'integer') return Number.isInteger(value)
   return typeof value === param.type
 }
 
-/** Reject unknown, missing, mistyped and out-of-enum arguments as JSON-RPC Invalid params. null counts as absent. */
+/** What is wrong with a value of the right type: out of its enum, its elements' enum or below its minimum. */
+function outOfRange(param: Param, value: unknown): string | undefined {
+  if (param.enum && typeof value === 'string' && !param.enum.includes(value)) return `must be one of ${param.enum.join(', ')}`
+  if (param.items && Array.isArray(value) && value.some(v => typeof v !== 'string' || !param.items?.enum.includes(v))) return `items must be one of ${param.items.enum.join(', ')}`
+  if (param.minimum !== undefined && typeof value === 'number' && value < param.minimum) return `must be at least ${param.minimum}`
+  return undefined
+}
+
+/** Reject unknown, missing, mistyped and out-of-range arguments as JSON-RPC Invalid params. null counts as absent. */
 function checkArgs(spec: ToolSpec, args: Args): void {
   const present = Object.entries(args).filter(([, v]) => v !== undefined && v !== null)
   const known = present.filter(([k]) => spec.params[k])
+  const typed = known.filter(([k, v]) => matches(spec.params[k], v))
   const problems = [
     ...present.filter(([k]) => !spec.params[k]).map(([k]) => `unknown parameter: ${k}`),
     ...(spec.required ?? []).filter(k => !present.some(([p]) => p === k)).map(k => `missing parameter: ${k}`),
     ...known.filter(([k, v]) => !matches(spec.params[k], v)).map(([k]) => `${k} must be ${spec.params[k].type}`),
-    ...known
-      .filter(([k, v]) => spec.params[k].enum && typeof v === 'string' && !spec.params[k].enum?.includes(v))
-      .map(([k]) => `${k} must be one of ${spec.params[k].enum?.join(', ')}`),
+    ...typed.flatMap(([k, v]) => {
+      const problem = outOfRange(spec.params[k], v)
+      return problem ? [`${k} ${problem}`] : []
+    }),
   ]
   if (problems.length) throw new McpError(ErrorCode.InvalidParams, `${spec.name}: ${problems.join('; ')}`)
 }
@@ -349,6 +401,32 @@ function optStrList(args: Args, key: string): string[] | undefined {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : undefined
 }
 
+/** Item kinds of a list param; checkArgs already matched every element against ITEM_KINDS. */
+function optKinds(args: Args, key: string): ConversationItemKind[] | undefined {
+  const value = optStrList(args, key)
+  return value && ITEM_KINDS.filter(kind => value.includes(kind))
+}
+
+/** Keep the kinds in `types` (all when absent), drop those in `exclude`, then take the last `last`. */
+function pick(items: SnapshotItem[], types: ConversationItemKind[] | undefined, exclude: ConversationItemKind[] | undefined, last: number | undefined): SnapshotItem[] {
+  const kept = items.filter(item => (!types || types.includes(item.kind)) && !exclude?.includes(item.kind))
+  return last === undefined ? kept : kept.slice(-last)
+}
+
+/**
+ * `snapshot`: state and notifications from the SessionManager, conversation items from the store. reset is decided
+ * once for every selected session: no since, another server_id, or any of them lost items to the retention limit
+ * after since. Filters touch only the items, never seq or reset.
+ */
+function snapshot(manager: SessionManager, store: ConversationStore, args: Args): SnapshotResult {
+  const since = optNum(args, 'since')
+  const base = manager.snapshot({ session: optStr(args, 'session'), since, server_id: optStr(args, 'server_id'), ack: optStrList(args, 'ack') })
+  const reset = since === undefined || optStr(args, 'server_id') !== base.server_id || base.sessions.some(s => store.lostSince(s.session, since))
+  const [types, exclude, last] = [optKinds(args, 'types'), optKinds(args, 'exclude_types'), optNum(args, 'last')]
+  const sessions = base.sessions.map(s => ({ ...s, items: pick(store.items(s.session, reset ? undefined : since), types, exclude, last) }))
+  return { server_id: base.server_id, seq: store.seq, reset, sessions }
+}
+
 // ── Handlers ──
 
 function respond(manager: SessionManager, verb: ApprovalVerb): Handler {
@@ -362,7 +440,7 @@ function respond(manager: SessionManager, verb: ApprovalVerb): Handler {
   )
 }
 
-function handlers(manager: SessionManager): Record<string, Handler> {
+function handlers(manager: SessionManager, store: ConversationStore): Record<string, Handler> {
   return {
     subagents: () => ({ subagents: manager.subagents() }),
     sessions: async args => {
@@ -389,15 +467,15 @@ function handlers(manager: SessionManager): Record<string, Handler> {
       signal,
     ),
     cancel: args => manager.cancel(reqStr(args, 'session')),
-    set_config: async args => ({
-      config_options: await manager.setConfig(reqStr(args, 'session'), reqStr(args, 'config_id'), reqStr(args, 'value')),
+    set_config: async (args, signal) => ({
+      config_options: await manager.setConfig(reqStr(args, 'session'), reqStr(args, 'config_id'), reqStr(args, 'value'), signal),
     }),
     status: args => manager.status(reqStr(args, 'session')),
     progress: args => manager.progress(reqStr(args, 'session')),
     output: args => manager.output(reqStr(args, 'session')),
     close: args => manager.close(optStr(args, 'session')),
     delete: args => manager.delete(reqStr(args, 'session')),
-    snapshot: args => manager.snapshot({ since: optNum(args, 'since'), server_id: optStr(args, 'server_id'), ack: optStrList(args, 'ack') }),
+    snapshot: args => snapshot(manager, store, args),
   }
 }
 
@@ -414,17 +492,17 @@ function failure(code: string, message: string): CallToolResult {
 }
 
 /**
- * Build the MCP server for a SessionManager. No transport is attached here, so stdio today and
- * other transports later share the same construction. Handlers only check params and wrap
- * results; the request's abort signal is passed to blocking calls. A blocking call whose request
- * carries a progressToken gets a progress notification every heartbeatMs while it waits, which
- * keeps idle-based client timeouts (Claude Code) from firing during long turns.
+ * Build the MCP server for a SessionManager and the ConversationStore listening to it. No transport is
+ * attached here, so stdio today and other transports later share the same construction. Handlers only
+ * check params and wrap results; the request's abort signal is passed to blocking calls. A blocking call
+ * whose request carries a progressToken gets a progress notification every heartbeatMs while it waits,
+ * which keeps idle-based client timeouts (Claude Code) from firing during long turns.
  */
-export function createServer(manager: SessionManager, version: string, opts: ServerOptions = {}): Server {
+export function createServer(manager: SessionManager, store: ConversationStore, version: string, opts: ServerOptions = {}): Server {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS
   const log = opts.log ?? ((message: string) => process.stderr.write(`${message}\n`))
   const server = new Server({ name: 'subagent-cockpit-mcp', version }, { capabilities: { tools: {} } })
-  const byName = handlers(manager)
+  const byName = handlers(manager, store)
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args = {}, _meta } = request.params

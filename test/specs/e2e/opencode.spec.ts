@@ -16,7 +16,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { ClientSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
-import { approvalId, baseEnv, childPids, clientToml, codexExec, COLOR_PROMPT, exists, firstChoice, openSession, promptIn, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
+import { approvalId, baseEnv, childPids, clientToml, codexExec, COLOR_PROMPT, exists, firstChoice, itemText, openSession, promptIn, replayed, snapshotItems, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
 import type { Server } from '../../fixtures/e2e'
 import { isAlive, until } from '../../fixtures/harness'
 import type { ToolReply } from '../../fixtures/harness'
@@ -229,10 +229,8 @@ test.describe('opencode e2e', () => {
     await expect(sessionsOf(page(), 'opencode').filter({ hasText: 'CLOSED' })).toHaveCount(1)
     const reopened = await server().call('open', { subagent: 'opencode', cwd: env().work, session })
     assert.equal(reopened.isError, false, JSON.stringify(reopened.data))
-    const snapshot = await server().call('snapshot', {})
-    const sessions = snapshot.data.sessions as Array<{ session: string; events: Array<{ replay: boolean; text?: string }> }>
-    const replayed = sessions.find(s => s.session === session)?.events.filter(e => e.replay) ?? []
-    assert.ok(replayed.some(e => new RegExp(NOTE).test(e.text ?? '')), 'replayed events should include the earlier reply')
+    const history = replayed(await snapshotItems(server(), session))
+    assert.ok(history.some(item => new RegExp(NOTE).test(itemText(item))), 'the replayed history should include the earlier reply')
     const r = await promptIn(server(), session, 'What was the content of note.txt you read earlier? Answer from memory, without reading it again.')
     assert.match(String(r.data.output), new RegExp(NOTE))
   })
@@ -329,7 +327,14 @@ test.describe('opencode e2e: processes and clients', () => {
     const env = await makeEnv()
     const server = await startServer(env.home)
     try {
-      const sessions = await Promise.all([1, 2].map(async () => String((await openSession(server, env.work, 'opencode')).data.session)))
+      // Opened one after the other: opencode 2.0.30 started twice at the same moment on a fresh data dir fails its
+      // own standalone server ("exited before reporting readiness"). A failed open shows the agent's stderr
+      const openOne = async () => {
+        const opened = await server.call('open', { subagent: 'opencode', cwd: env.work })
+        assert.equal(opened.isError, false, `${JSON.stringify(opened.data)}\n${server.stderr().slice(-3000)}`)
+        return String(opened.data.session)
+      }
+      const sessions = [await openOne(), await openOne()]
       assert.equal(childPids(server.pid ?? assert.fail('no server pid')).length, 2)
       const tag = (i: number) => `OPENCODE-TWIN-${i}`
       const replies = await Promise.all(sessions.map((session, i) => promptIn(server, session, `Write the numbers 1 to 30 separated by spaces, then ${tag(i)} on its own line. Do not run any tools.`)))

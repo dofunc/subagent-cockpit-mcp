@@ -6,6 +6,7 @@ import './adapter/grok-adapter'
 import './adapter/opencode-adapter'
 import './adapter/antigravity-adapter'
 import { loadConfig, resolveHome } from './config'
+import { ConversationStore } from './conversation-store'
 import type { Host } from './host/host'
 import { NodeHost } from './host/node-host'
 import { createServer } from './server'
@@ -36,8 +37,9 @@ async function runMcp(): Promise<void> {
   const home = resolveHome(host)
   const config = await loadConfig(host, home)
   const manager = new SessionManager(host, config, home)
-  const server = createServer(manager, VERSION)
-  const link = new WebuiLink(host, manager, webuiPort(host, config), VERSION)
+  const store = new ConversationStore(manager, config.snapshot, host)
+  const server = createServer(manager, store, VERSION)
+  const link = new WebuiLink(host, manager, webuiPort(host, config), VERSION, config.webui)
   server.oninitialized = () => {
     const client = server.getClientVersion()
     client && link.setClient({ name: client.name, version: client.version })

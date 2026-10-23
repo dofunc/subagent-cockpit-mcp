@@ -29,6 +29,32 @@ const field = (page: Page, label: string) => page.locator('th').filter({ hasText
 
 const alert = (scope: Locator, title: string) => scope.getByRole('alert').filter({ hasText: title })
 
+/** Computed font-family and font-size of the first element a locator finds. */
+const font = (locator: Locator) => locator.first().evaluate(el => [getComputedStyle(el).fontFamily, getComputedStyle(el).fontSize])
+
+const MONO = /^"?Sarasa Mono SC"?,/
+
+/** Where each text starts on screen, inside one element; texts on separate lines have different tops. */
+const lineTops = (scope: Locator, texts: string[]) => scope.first().evaluate((root, wanted) => {
+  const collect = (node: Node): Node[] => (node.nodeType === Node.TEXT_NODE ? [node] : Array.from(node.childNodes).flatMap(collect))
+  const nodes = collect(root)
+  return wanted.map(want => {
+    const node = nodes.find(n => n.textContent?.includes(want))
+    const start = node?.textContent?.indexOf(want) ?? -1
+    if (!node || start < 0) return null
+    const range = document.createRange()
+    range.setStart(node, start)
+    range.setEnd(node, start + 1)
+    return range.getBoundingClientRect().top
+  })
+}, texts)
+
+/** Vertical center of an element's box. */
+const center = async (locator: Locator) => {
+  const box = await locator.boundingBox()
+  return box ? box.y + box.height / 2 : Number.NaN
+}
+
 test.describe('mock: webui page', () => {
   test('W1 the session list groups sessions by subagent with state, disconnect mark and tooltip', async ({ page }) => {
     await openPage(page)
@@ -95,11 +121,11 @@ test.describe('mock: webui page', () => {
     await expect(thought).toBeHidden()
 
     // The role turn, the validation turn and the live summary end done; one turn each is cancelled and fails
-    for (const [ending, count] of [[/^turn \d+ · done/, 3], [/^turn \d+ · cancelled/, 1], [/^turn \d+ · error · Internal error/, 1]] as const) {
+    for (const [ending, count] of [[/^turn \d+ · done/, 3], [/^turn \d+ · cancelled/, 1], [/^turn \d+ · error · [\d.]+s · Internal error/, 1]] as const) {
       await expect(panel.getByRole('separator').filter({ hasText: ending })).toHaveCount(count)
     }
-    // Token counts from a thousand on read as K with one decimal; the cache hit rate is of the whole prompt
-    await expect(panel.getByRole('separator').filter({ hasText: /^turn \d+ · done · end_turn · \d+(\.\d)?K tokens · cache 80%$/ }).first()).toBeVisible()
+    // Token counts from a thousand on read as K with one decimal, after the turn's duration; the cache hit rate is of the whole prompt
+    await expect(panel.getByRole('separator').filter({ hasText: /^turn \d+ · done · end_turn · [\d.]+s · \d+(\.\d)?K tokens · cache 80%$/ }).first()).toBeVisible()
   })
 
   test('W4 tool calls: status icons, diffs, terminal, locations, input and output as key/value lists', async ({ page }) => {
@@ -325,5 +351,110 @@ test.describe('mock: webui page', () => {
     const task = releaser.locator('.ant-collapse-item').filter({ has: page.getByText('subagent', { exact: true }) })
     await expect(task.locator('code', { hasText: /^ci\.yml$/ })).toHaveCount(1)
     await expect(task).not.toContainText('`ci.yml`')
+  })
+
+  test('W10 the conversation tab is monospace throughout; the rest of the page keeps the system font', async ({ page }) => {
+    await openPage(page)
+    await pick(page, 'Add input validation')
+    const panel = tab(page, 'Conversation')
+    const tool = (title: RegExp) => panel.locator('.ant-collapse-item').filter({ has: page.getByRole('button', { name: title }) }).first()
+    const diff = panel.locator('pre').filter({ hasText: '@@ -0,0 +1,5 @@' })
+    const monospace: Array<[string, Locator, string]> = [
+      ['reply', panel.locator('.x-markdown p').filter({ hasText: 'I\'ll start by reading the handler' }), '12px'],
+      ['thinking', panel.getByText(/^The route inserts the body as-is/), '12px'],
+      ['tool title', panel.getByText('Read src/api/users.ts', { exact: true }), '12px'],
+      ['tool output', tool(/^check-circle npm test/).getByText(/^PASS test\/users\.test\.ts/), '12px'],
+      ['tag', panel.locator('.ant-tag').filter({ hasText: /^reply$/ }), '10px'],
+      ['code block pre', panel.locator('.x-markdown pre').filter({ hasText: 'export function validateUser' }), '12px'],
+      ['code block code', panel.locator('.x-markdown pre code').filter({ hasText: 'export function validateUser' }), '12px'],
+      ['diff pre', diff, '12px'],
+      ['diff code', diff.locator('code'), '12px'],
+    ]
+    for (const [name, locator, size] of monospace) {
+      const [family, fontSize] = await font(locator)
+      expect(family, name).toMatch(MONO)
+      expect(fontSize, name).toBe(size)
+    }
+    const system: Array<[string, Locator]> = [
+      ['session list', page.getByRole('menuitem', { name: /^Add input validation/ })],
+      ['page header', page.getByRole('banner')],
+      ['tab title', page.getByRole('tab', { name: 'Conversation' })],
+    ]
+    for (const [name, locator] of system) expect((await font(locator))[0], name).not.toMatch(/Sarasa Mono SC/)
+
+    // Chinese and Japanese text asks for the same monospace family; the 2:1 width needs the font installed
+    await pick(page, '把 src/api/users.ts')
+    const cjk = tab(page, 'Conversation')
+    const texts: Array<[string, Locator]> = [
+      ['simplified reply', cjk.locator('.x-markdown p').filter({ hasText: '已在 POST 与 PATCH 路由加入校验' })],
+      ['simplified table', cjk.locator('.x-markdown td').filter({ hasText: '新增，校验' })],
+      ['traditional reply', cjk.locator('.x-markdown p').filter({ hasText: '已更新用戶資料的檢查' })],
+      ['japanese reply', cjk.locator('.x-markdown p').filter({ hasText: 'バリデーションを追加しました' })],
+      ['tool title', cjk.getByText('读取 src/api/users.ts 的校验逻辑', { exact: true })],
+      ['code comment', cjk.locator('.x-markdown pre').filter({ hasText: '// 名称不超过 80 个字符' })],
+    ]
+    for (const [name, locator] of texts) expect((await font(locator))[0], name).toMatch(MONO)
+    await page.getByRole('tab', { name: 'Session' }).click()
+    const capabilities = tab(page, 'Session').locator('pre').filter({ hasText: '"loadSession"' })
+    for (const locator of [capabilities, capabilities.locator('code')]) expect((await font(locator))[0], 'capabilities').not.toMatch(/Sarasa Mono SC/)
+  })
+
+  test('W11 a tool\'s status icon lines up with the first line of its title', async ({ page }) => {
+    await openPage(page)
+    await pick(page, 'Tidy the changelog entries')
+    const panel = tab(page, 'Conversation')
+    const header = (title: string) => panel.locator('.ant-collapse-header').filter({ hasText: title })
+    // The status icon, not the Collapse arrow, which antd already puts on the first line
+    const status = (scope: Locator) => scope.getByRole('img', { name: /^(check-circle|close-circle|loading|minus-circle)$/ })
+    // The flex item holding the title spans whole lines; the <strong> inside is inline and only as tall as its glyphs
+    const titleOf = (scope: Locator, title: RegExp) => scope.locator('.ant-typography').filter({ hasText: title })
+    const long = header('Search CHANGELOG.md for entries')
+    const title = titleOf(long, /^Search CHANGELOG\.md for entries/)
+    const lineHeight = await title.evaluate(el => Number.parseFloat(getComputedStyle(el).lineHeight))
+    const box = await title.boundingBox()
+    expect(box && box.height >= lineHeight * 1.5, 'the long title wraps').toBe(true)
+    const firstLine = (box?.y ?? Number.NaN) + lineHeight / 2
+    expect(Math.abs(await center(status(long)) - firstLine)).toBeLessThanOrEqual(2)
+
+    const short = header('Read CHANGELOG.md')
+    expect(Math.abs(await center(status(short)) - await center(titleOf(short, /^Read CHANGELOG\.md$/)))).toBeLessThanOrEqual(2)
+  })
+
+  test('W12 a single newline breaks the line in replies, thinking and plans; code blocks keep their lines', async ({ page }) => {
+    await openPage(page)
+    await pick(page, 'Tidy the changelog entries')
+    const panel = tab(page, 'Conversation')
+    const cases: Array<[string, Locator, [string, string]]> = [
+      ['reply', panel.locator('.x-markdown').filter({ hasText: 'Rewrote 9 entries.' }), ['Rewrote 9 entries.', 'Grouped them']],
+      ['thinking', panel.locator('.x-markdown').filter({ hasText: 'The entries mix tenses.' }), ['The entries mix tenses.', 'Past tense reads']],
+      ['plan', panel.locator('.x-markdown').filter({ hasText: 'Rewrite the entries in past tense.' }), ['Rewrite the entries', 'Sort them by area.']],
+    ]
+    for (const [name, scope, texts] of cases) {
+      const [first, second] = await lineTops(scope, texts)
+      expect(first !== null && second !== null && second > first, name).toBe(true)
+    }
+    const code = panel.locator('pre').filter({ hasText: 'Fixed the navbar overflow' }).first()
+    expect((await code.innerText()).trim().split('\n')).toEqual(['- Fixed the navbar overflow', '- Moved billing to the v2 client'])
+  })
+
+  test('W14 a turn still running when the agent exits ends with a closed divider', async ({ page }) => {
+    await openPage(page)
+    await expect(page.getByRole('menuitem', { name: /^Build the docs site\. CLOSED$/ })).toBeVisible()
+    await pick(page, 'Build the docs site')
+    const panel = tab(page, 'Conversation')
+    await expect(panel.getByRole('separator').last()).toHaveText(/^turn \d+ · closed · exited/)
+  })
+
+  test('W13 the turn divider shows how long the turn took, before the tokens', async ({ page }) => {
+    await openPage(page)
+    await pick(page, 'Tidy the changelog entries')
+    const panel = tab(page, 'Conversation')
+    for (const duration of ['1m 23s', '8.2s']) {
+      await expect(panel.getByRole('separator').filter({ hasText: new RegExp(`^turn \\d+ · done · end_turn · ${duration.replace('.', '\\.')} · \\S+ tokens`) })).toHaveCount(1)
+    }
+    // The divider text reads like the rest of the conversation, not in antd's larger, heavier divider style
+    const look = (locator: Locator) => locator.first().evaluate(el => [getComputedStyle(el).fontFamily, getComputedStyle(el).fontSize, getComputedStyle(el).fontWeight])
+    const divider = panel.getByRole('separator').filter({ hasText: '1m 23s' }).locator('.ant-divider-inner-text')
+    expect(await look(divider)).toEqual(await look(panel.locator('.x-markdown p').filter({ hasText: 'The dates are in order.' })))
   })
 })

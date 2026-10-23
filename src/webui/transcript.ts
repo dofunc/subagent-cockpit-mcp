@@ -1,6 +1,5 @@
 import type { AcpWireMessage, JsonObject, JsonValue, ConversationActivity, ConversationItem, ConversationItemKind, Conversation, TruncatedMessage } from '../types'
 import { PARSERS } from './parsers'
-import { WEBUI_ITEM_LIMIT, WEBUI_LOG_LIMIT } from './protocol'
 
 type Direction = 'in' | 'out'
 
@@ -67,20 +66,24 @@ export const isObject = (value: JsonValue | undefined): value is JsonObject =>
 
 const requestKey = (direction: Direction, id: string | number) => `${direction}:${typeof id}:${id}`
 
-export function createConversation(mcpId: string, session: string, opened: Extract<ConversationActivity, { kind: 'session_opened' }>): Conversation {
+/** A new session view keeping at most `maxMessages` protocol log entries. */
+export function createConversation(mcpId: string, session: string, opened: Extract<ConversationActivity, { kind: 'session_opened' }>, maxMessages: number): Conversation {
   const { subagent, adapter, cwd, title, state } = opened
   return {
     session, mcp_id: mcpId, subagent, adapter, cwd, title, state,
     cancelling: false, closed: null, info: {}, items: [], log: [], requests: {}, version: 0,
+    max_messages: maxMessages, changes: { touched: [], removed: [] },
   }
 }
 
 /**
- * Apply one activity in place; returns the session for chaining. The webui process and the browser
- * run the same code, so a browser that starts from `init` and applies the later activities ends up
- * with what the webui process holds.
+ * Apply one activity in place; returns the session for chaining. The webui process, the browser and the
+ * MCP layer's ConversationStore run the same code, so a browser that starts from `init` and applies the later
+ * activities ends up with what the webui process holds. `changes` lists the items this call created, changed
+ * or removed.
  */
 export function applyActivity(view: Conversation, at: number, activity: ConversationActivity): Conversation {
+  view.changes = { touched: [], removed: [] }
   switch (activity.kind) {
     case 'acp':
       applyMessage(view, at, activity.direction, activity.message)
@@ -96,35 +99,25 @@ export function applyActivity(view: Conversation, at: number, activity: Conversa
       const context = typeof size === 'number' && size > 0 ? { used, size } : null
       pushItem(view, {
         id: `turn:${activity.turn_id}`, kind: 'turn', at, turn_id: activity.turn_id,
-        data: { outcome: activity.outcome, error: activity.error, stopReason, usage, context }, log: [],
+        data: { outcome: activity.outcome, error: activity.error, stopReason, usage, context, ...durationOf(view, activity.turn_id, at) }, log: [],
       })
       break
     }
-    case 'approval': {
-      const item = view.items.findLast(i => i.kind === 'approval' && i.data.approval_id === undefined && toolCallId(i) === activity.tool_call_id)
-      item && (item.data.approval_id = activity.approval_id)
+    case 'approval':
+      patch(view, view.items.findLast(i => i.kind === 'approval' && i.data.approval_id === undefined && toolCallId(i) === activity.tool_call_id), { approval_id: activity.approval_id })
       break
-    }
-    case 'approval_resolved': {
-      const item = view.items.findLast(i => i.kind === 'approval' && i.data.approval_id === activity.approval_id)
-      item && Object.assign(item.data, { resolution: activity.resolution, option_id: activity.option_id })
+    case 'approval_resolved':
+      patch(view, view.items.findLast(i => i.kind === 'approval' && i.data.approval_id === activity.approval_id), { resolution: activity.resolution, option_id: activity.option_id })
       break
-    }
-    case 'auto_approved': {
-      const item = view.items.findLast(i => i.kind === 'approval' && i.data.resolution === undefined && toolCallId(i) === activity.tool_call_id)
-      item && Object.assign(item.data, { resolution: 'auto', option_id: activity.option_id })
+    case 'auto_approved':
+      patch(view, view.items.findLast(i => i.kind === 'approval' && i.data.resolution === undefined && toolCallId(i) === activity.tool_call_id), { resolution: 'auto', option_id: activity.option_id })
       break
-    }
-    case 'question': {
-      const item = view.items.findLast(i => i.kind === 'question' && i.data.question_id === undefined)
-      item && (item.data.question_id = activity.question_id)
+    case 'question':
+      patch(view, view.items.findLast(i => i.kind === 'question' && i.data.question_id === undefined), { question_id: activity.question_id })
       break
-    }
-    case 'question_resolved': {
-      const item = view.items.findLast(i => i.kind === 'question' && i.data.question_id === activity.question_id)
-      item && (item.data.action = activity.action)
+    case 'question_resolved':
+      patch(view, view.items.findLast(i => i.kind === 'question' && i.data.question_id === activity.question_id), { action: activity.action })
       break
-    }
     case 'state':
       view.state = activity.state
       view.cancelling = activity.cancelling
@@ -135,19 +128,62 @@ export function applyActivity(view: Conversation, at: number, activity: Conversa
         state: activity.state, closed: null, requests: {},
       })
       break
-    case 'session_closed':
+    case 'session_closed': {
+      const turn = currentTurn(view)
+      // close() and an unexpected exit send no turn_finished; end the turn here so a replay after reconnect is not taken into it
+      turn !== null && pushItem(view, {
+        id: `turn:${turn}`, kind: 'turn', at, turn_id: turn,
+        data: { outcome: 'closed', reason: activity.reason, error: null, stopReason: null, usage: null, context: null, ...durationOf(view, turn, at) }, log: [],
+      })
       view.closed = activity.reason
       break
+    }
   }
-  view.items.length > WEBUI_ITEM_LIMIT && view.items.splice(0, view.items.length - WEBUI_ITEM_LIMIT)
   view.version++
   return view
+}
+
+/** `duration_ms` of a turn ending at `at`, from its prompt item; empty without that item. */
+function durationOf(view: Conversation, turn: number, at: number): JsonObject {
+  const prompt = findItem(view, `prompt:${turn}`)
+  return prompt ? { duration_ms: at - prompt.at } : {}
+}
+
+/** Merge fields into an item's data, when there is the item, and record the change. */
+function patch(view: Conversation, item: ConversationItem | undefined, fields: JsonObject): void {
+  if (!item) return
+  Object.assign(item.data, fields)
+  touch(view, item)
+}
+
+/** Record that an item was created or changed in this applyActivity call. */
+function touch(view: Conversation, item: ConversationItem): void {
+  view.changes.touched.includes(item.id) || view.changes.touched.push(item.id)
+}
+
+/**
+ * Keep at most max_messages log entries, then drop the items nothing kept backs: items whose log entries all
+ * went, and log-less items (turn dividers, approval results) older than the oldest entry kept. The turn in
+ * progress stays whole: turn_finished and the prompt response land on its prompt item.
+ */
+function trim(view: Conversation): void {
+  const excess = view.log.length - view.max_messages
+  if (excess <= 0) return
+  view.log.splice(0, excess)
+  const [oldest] = view.log
+  const turn = currentTurn(view)
+  const kept = (item: ConversationItem) => (turn !== null && item.turn_id === turn)
+    || (item.log.length > 0 ? item.log.some(seq => seq >= oldest.seq) : item.at >= oldest.at)
+  const removed = view.items.filter(item => !kept(item))
+  if (removed.length === 0) return
+  view.items = view.items.filter(kept)
+  view.changes.removed.push(...removed.map(item => item.id))
 }
 
 function applyMessage(view: Conversation, at: number, direction: Direction, message: AcpWireMessage | TruncatedMessage): void {
   const seq = (view.log.at(-1)?.seq ?? 0) + 1
   view.log.push({ seq, at, direction, message })
-  view.log.length > WEBUI_LOG_LIMIT && view.log.splice(0, view.log.length - WEBUI_LOG_LIMIT)
+  trim(view)
 
   if ('truncated' in message) {
     pushItem(view, { id: `raw:${seq}`, kind: 'raw', at, turn_id: currentTurn(view), data: { direction, ...message }, log: [seq] })
@@ -175,6 +211,7 @@ function applyRequest(view: Conversation, at: number, direction: Direction, seq:
     if (pending) {
       Object.assign(pending.data, params)
       pending.log.push(seq)
+      touch(view, pending)
       return pending.id
     }
     return pushItem(view, { id: `prompt:${seq}`, kind: 'prompt', at, turn_id: turn, data: { internal: false, ...params }, log: [seq] })
@@ -203,7 +240,10 @@ function applyResponse(view: Conversation, at: number, direction: Direction, seq
 
   if (message.error) {
     const method = itemId?.startsWith('info:') ? itemId.slice('info:'.length) : item && (REQUEST_METHODS[item.kind] ?? item.data.method)
-    item?.log.push(seq)
+    if (item) {
+      item.log.push(seq)
+      touch(view, item)
+    }
     pushItem(view, { id: `error:${seq}`, kind: 'error', at, turn_id: currentTurn(view), data: { method: method ?? null, id, direction, error: message.error }, log: [seq] })
     return
   }
@@ -219,6 +259,7 @@ function applyResponse(view: Conversation, at: number, direction: Direction, seq
     const promptResult = parserOf(view)?.promptResult
     item.data.result = item.kind === 'prompt' && promptResult && isObject(result) ? promptResult(result) : result
     item.log.push(seq)
+    touch(view, item)
     return
   }
   const parsed = parserOf(view)?.message?.(message, contextOf(view))
@@ -263,6 +304,7 @@ function applyGenericUpdate(view: Conversation, at: number, seq: number, update:
     if (last?.kind === chunk && last.data.sessionUpdate === kind && last.turn_id === turn && sameChild && sameMessage('messageId') && sameMessage('compactionId')) {
       appendContent(last, fields.content)
       last.log.push(seq)
+      touch(view, last)
       return
     }
     pushItem(view, { id: `${chunk}:${seq}`, kind: chunk, at, turn_id: turn, data: { sessionUpdate: kind, ...fields, content: fields.content === undefined ? [] : [fields.content] }, log: [seq] })
@@ -274,6 +316,7 @@ function applyGenericUpdate(view: Conversation, at: number, seq: number, update:
     if (item) {
       Object.assign(item.data, fields)
       item.log.push(seq)
+      touch(view, item)
       return
     }
     pushItem(view, { id, kind: 'tool', at, turn_id: turn, data: { sessionUpdate: kind, ...fields }, log: [seq] })
@@ -292,6 +335,7 @@ function applyGenericUpdate(view: Conversation, at: number, seq: number, update:
     // The latest plan replaces the earlier one in place; a removed plan keeps its content
     item.data = kind === 'plan_removed' ? { ...item.data, removed: true } : { sessionUpdate: kind, ...fields }
     item.log.push(seq)
+    touch(view, item)
     return
   }
   if (single) {
@@ -341,6 +385,7 @@ function appendContent(item: ConversationItem, block: JsonValue | undefined): vo
 
 function pushItem(view: Conversation, item: ConversationItem): string {
   view.items.push(item)
+  touch(view, item)
   return item.id
 }
 

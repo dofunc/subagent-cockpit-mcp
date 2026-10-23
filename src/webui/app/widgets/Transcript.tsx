@@ -42,6 +42,14 @@ function tokenCount(count: number): string {
   return `${(count / divisor).toFixed(unit ? 1 : 0).replace(/\.0$/, '')}${unit}`
 }
 
+/** A turn's length: 8.2s under a minute, 1m 23s under an hour, then 1h 2m. */
+function duration(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1).replace(/\.0$/, '')}s`
+  if (ms < 3_600_000) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+}
+
 /**
  * Percent of the prompt read from the cache, or undefined when the agent reports no cache reads. ACP keeps
  * cache reads and writes out of inputTokens, so the prompt is all three together.
@@ -52,7 +60,10 @@ function cacheRate(usage: JsonObject): number | undefined {
   return typeof usage.cachedReadTokens === 'number' && prompt > 0 ? Math.round((read / prompt) * 100) : undefined
 }
 
-/** Divider text for a finished turn: outcome, stop reason, tokens, cache hit rate, context at its end and error. */
+/**
+ * Divider text for a finished turn: outcome (and why, for a turn the close ended), stop reason, duration, tokens,
+ * cache hit rate, context at its end and error.
+ */
 function turnSummary({ turn_id, data }: ConversationItem, t: Translate): string {
   const usage = obj(data.usage)
   const context = obj(data.context)
@@ -60,7 +71,9 @@ function turnSummary({ turn_id, data }: ConversationItem, t: Translate): string 
   return [
     t('turn', { id: turn_id ?? '?' }),
     text(data.outcome),
+    text(data.reason),
     text(data.stopReason),
+    typeof data.duration_ms === 'number' ? duration(data.duration_ms) : '',
     usage.totalTokens === undefined ? '' : t('tokens', { count: tokenCount(Number(usage.totalTokens)) }),
     rate === undefined ? '' : t('cacheHit', { rate: String(rate) }),
     context.size === undefined ? '' : t('turnContext', { used: tokenCount(Number(context.used)), size: tokenCount(Number(context.size)) }),
@@ -253,9 +266,10 @@ export default function Transcript({ session }: { session: Conversation }) {
   // turn_started opens the prompt item just before session/prompt fills it; an empty bubble would flash
   const shown = session.items.filter(item => item.kind !== 'prompt' || item.data.prompt !== undefined)
   const items = shown.map((item, index) => toBubble(session, item, index === shown.length - 1, t))
+  // The tab's font is a CSS variable (markdown.css); antd components take it as their font token
   return (
-    <Compact>
-      <Bubble.List style={{ height: '100%' }} role={ROLES} items={items} />
+    <Compact font="var(--cockpit-conversation-font)">
+      <Bubble.List className="cockpit-conversation" style={{ height: '100%' }} role={ROLES} items={items} />
     </Compact>
   )
 }

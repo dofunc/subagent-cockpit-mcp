@@ -13,15 +13,18 @@ export class ConversationStore {
   version = 0
   private listeners = new Set<Listener>()
   private frame: number | null = null
+  /** The webui's message limit, for sessions opened after `init` */
+  private maxMessages = 0
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
   }
 
-  reset({ mcps, sessions }: ConversationStreamEvents['init']): void {
+  reset({ mcps, sessions, max_messages }: ConversationStreamEvents['init']): void {
     this.mcps = mcps
-    this.sessions = sessions
+    this.sessions = sessions.map(session => ({ ...session, changes: { touched: [], removed: [] } }))
+    this.maxMessages = max_messages
     this.changed()
   }
 
@@ -39,7 +42,7 @@ export class ConversationStore {
   /** Activities of a session that never opened here are dropped, as the webui process does. */
   apply({ mcp_id, session, at, activity }: ConversationStreamEvents['activity']): void {
     const existing = this.sessions.find(s => s.mcp_id === mcp_id && s.session === session)
-    const view = existing ?? (activity.kind === 'session_opened' ? createConversation(mcp_id, session, activity) : null)
+    const view = existing ?? (activity.kind === 'session_opened' ? createConversation(mcp_id, session, activity, this.maxMessages) : null)
     if (!view) return
     !existing && this.sessions.push(view)
     applyActivity(view, at, activity)

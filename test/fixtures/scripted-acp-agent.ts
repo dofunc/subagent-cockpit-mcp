@@ -99,7 +99,8 @@ export interface Script {
   resume?: boolean
   delete?: boolean
   authRequired?: boolean
-  delays?: { initialize?: number; newSession?: number; loadSession?: number; role?: number; cancel?: number | 'never'; delete?: number }
+  /** setConfig holds each session/set_config_option response; exit is how long the process lives on after stdin closes */
+  delays?: { initialize?: number; newSession?: number; loadSession?: number; role?: number; cancel?: number | 'never'; delete?: number; setConfig?: number; exit?: number }
   errors?: { load?: boolean; delete?: boolean; setConfig?: boolean }
   configOptions?: acp.SessionConfigOption[]
   replay?: string[]
@@ -339,6 +340,8 @@ const conn = new AgentSideConnection(client => {
     async setSessionConfigOption(params) {
       const value = 'value' in params ? params.value : null
       log({ event: 'set_config', configId: params.configId, value })
+      await sleep(script().delays?.setConfig ?? 0)
+      log({ event: 'set_config_done', configId: params.configId, value })
       if (script().errors?.setConfig) throw new RequestError(-32603, 'set config failed')
       state.configOptions = state.configOptions.map(o => (o.id === params.configId && o.type === 'select' && typeof value === 'string' ? { ...o, currentValue: value } : o))
       return { configOptions: state.configOptions }
@@ -369,4 +372,8 @@ const conn = new AgentSideConnection(client => {
   return agent
 }, ndJsonStream(output, input))
 
-conn.closed.then(() => process.exit(0))
+conn.closed.then(async () => {
+  await sleep(script().delays?.exit ?? 0)
+  log({ event: 'exited' })
+  process.exit(0)
+})

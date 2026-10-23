@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ClientSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
-import { approvalId, baseEnv, childPids, clientToml, codexExec, COLOR_PROMPT, exists, firstChoice, openSession, promptIn, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
+import { approvalId, baseEnv, childPids, clientToml, codexExec, COLOR_PROMPT, exists, firstChoice, itemText, openSession, promptIn, replayed, snapshotItems, startServer, TURN_TIMEOUT } from '../../fixtures/e2e'
 import type { Server } from '../../fixtures/e2e'
 import { isAlive, until } from '../../fixtures/harness'
 import type { ToolReply } from '../../fixtures/harness'
@@ -155,17 +155,15 @@ test.describe('codex e2e', () => {
     assert.equal(config.reasoning_effort, 'medium')
   })
 
-  test('E7 close and reconnect replays history into snapshot events', async () => {
+  test('E7 close and reconnect replays history into the snapshot conversation', async () => {
     test.setTimeout(TURN_TIMEOUT)
     const session = ctx.session ?? assert.fail('E1 session missing')
     await server().call('close', { session })
     await expect(sessionsOf(page(), 'codex').filter({ hasText: 'CLOSED' })).toHaveCount(1)
     const reopened = await server().call('open', { subagent: 'codex', cwd: env().work, session })
     assert.equal(reopened.isError, false, JSON.stringify(reopened.data))
-    const snapshot = await server().call('snapshot', {})
-    const sessions = snapshot.data.sessions as Array<{ session: string; events: Array<{ replay: boolean; text?: string }> }>
-    const replayed = sessions.find(s => s.session === session)?.events.filter(e => e.replay) ?? []
-    assert.ok(replayed.some(e => /PONG/.test(e.text ?? '')), 'replayed events should include the earlier reply')
+    const history = replayed(await snapshotItems(server(), session))
+    assert.ok(history.some(item => /PONG/.test(itemText(item))), 'the replayed history should include the earlier reply')
   })
 
   test('E11 mode read-only: writing asks for approval or is refused (recorded)', async () => {

@@ -1,7 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { AcpWireMessage, JsonObject, JsonValue, ConversationActivity, ConversationItem, ConversationItemKind, Conversation } from '../../src/types'
-import { WEBUI_ITEM_LIMIT, WEBUI_LOG_LIMIT } from '../../src/webui/protocol'
 import { PARSERS } from '../../src/webui/parsers'
 import type { TranscriptParser } from '../../src/webui/transcript'
 import { applyActivity, createConversation, isObject } from '../../src/webui/transcript'
@@ -19,7 +18,7 @@ const finished = (turn_id: number): ConversationActivity => ({ kind: 'turn_finis
 
 /** A fresh session view of the adapter with the activities applied in order, one millisecond apart. */
 function feedAs(adapter: string, ...activities: ConversationActivity[]): Conversation {
-  const view = createConversation('mcp-1', `${adapter}_s1`, { ...OPENED, adapter })
+  const view = createConversation('mcp-1', `${adapter}_s1`, { ...OPENED, adapter }, 5000)
   activities.forEach((activity, index) => applyActivity(view, index, activity))
   return view
 }
@@ -233,7 +232,8 @@ describe('transcript: approvals, questions and turns', () => {
     assert.deepEqual(field(question.data.result, 'content'), { choice: 'a' })
 
     const turn = item(view, 'turn:1')
-    assert.deepEqual(turn.data, { outcome: 'done', error: null, stopReason: 'end_turn', usage: { totalTokens: 10 }, context: null })
+    // feed applies the activities 1 ms apart: turn_started is the first, turn_finished the sixteenth
+    assert.deepEqual(turn.data, { outcome: 'done', error: null, stopReason: 'end_turn', usage: { totalTokens: 10 }, context: null, duration_ms: 15 })
     assert.equal(view.title, 'Fix login')
     assert.equal(view.state, 'IDLE')
     assert.equal(view.closed, 'idle')
@@ -278,20 +278,112 @@ describe('transcript: request ids', () => {
 })
 
 describe('transcript: limits', () => {
-  test('U208 items and log keep the latest entries; version counts every activity', () => {
-    const view = createConversation('mcp-1', 'grok_s1', OPENED)
-    const total = WEBUI_ITEM_LIMIT + 2
+  test('U208 the log keeps max_messages entries and the items they back; version counts every activity', () => {
+    const view = createConversation('mcp-1', 'grok_s1', OPENED, 5000)
+    const total = 5002
+    const removed: string[] = []
     Array.from({ length: total }, (_, index) => update({ sessionUpdate: 'notice', severity: 'info', title: `n${index}` }))
       .forEach((activity, index) => {
         applyActivity(view, index, activity)
+        removed.push(...view.changes.removed)
         assert.equal(view.version, index + 1)
       })
-    assert.equal(view.items.length, WEBUI_ITEM_LIMIT)
-    assert.equal(view.log.length, WEBUI_LOG_LIMIT)
+    assert.equal(view.log.length, 5000)
+    assert.equal(view.items.length, 5000)
+    assert.deepEqual(removed, ['notice:1', 'notice:2'])
     assert.equal(view.items[0].id, 'notice:3')
     assert.equal(field(view.items[0].data, 'title'), 'n2')
     assert.equal(view.log[0].seq, 3)
     assert.equal(view.log.at(-1)?.seq, total)
+  })
+
+  const promptOut = (id: number): ConversationActivity => acp('out', { id, method: 'session/prompt', params: { sessionId: 's1', prompt: [{ type: 'text', text: `p${id}` }] } })
+  const promptDone = (id: number): ConversationActivity => acp('in', { id, result: { stopReason: 'end_turn', usage: { totalTokens: 5 } } })
+  const tool = (sessionUpdate: string, toolCallId: string, fields: JsonObject = {}): ConversationActivity => update({ sessionUpdate, toolCallId, ...fields })
+
+  /** A view keeping `max` log entries, with every activity applied 1 ms apart; collects what each call removed. */
+  function limited(max: number, ...activities: ConversationActivity[]): { view: Conversation; removed: string[] } {
+    const view = createConversation('mcp-1', 'grok_s1', OPENED, max)
+    const removed: string[] = []
+    activities.forEach((activity, index) => {
+      applyActivity(view, index, activity)
+      removed.push(...view.changes.removed)
+    })
+    return { view, removed }
+  }
+
+  const firstTurn = [started(1), promptOut(1), chunk('agent_message_chunk', 'a', 'm1'), chunk('agent_message_chunk', 'b', 'm2'), tool('tool_call', 't1', { title: 'Read' }), promptDone(1), finished(1)]
+
+  test('U245 items go with the messages behind them; a finished turn goes whole, divider included', () => {
+    const next = Array.from({ length: 12 }, (_, i) => chunk('agent_message_chunk', `x${i}`, `n${i}`))
+    const { view, removed } = limited(10, ...firstTurn, started(2), promptOut(2), ...next)
+    assert.deepEqual(removed.sort(), ['message:2', 'message:3', 'prompt:1', 'tool:t1', 'turn:1'])
+    assert.ok(view.items.every(i => i.turn_id === 2))
+    assert.equal(ofKind(view, 'message').length, 12)
+    assert.equal(view.log.length, 10)
+  })
+
+  test('U246 an item still being updated stays, with its latest state', () => {
+    const others = Array.from({ length: 12 }, (_, i) => update({ sessionUpdate: 'notice', severity: 'info', title: `n${i}` }))
+    const { view } = limited(10, tool('tool_call', 't1', { title: 'Build', status: 'in_progress' }), ...others, tool('tool_call_update', 't1', { status: 'completed' }))
+    const built = item(view, 'tool:t1')
+    assert.equal(built.data.status, 'completed')
+    assert.equal(built.log.at(-1), view.log.at(-1)?.seq)
+  })
+
+  test('U247 changes lists only the items each activity created or changed', () => {
+    const view = createConversation('mcp-1', 'grok_s1', OPENED, 5000)
+    const touched = (activity: ConversationActivity) => {
+      applyActivity(view, 0, activity)
+      assert.deepEqual(view.changes.removed, [])
+      return view.changes.touched
+    }
+    touched(started(1))
+    touched(promptOut(1))
+    // Ids carry the log seq of the message that made the item: the prompt request is 1
+    assert.deepEqual(touched(chunk('agent_message_chunk', 'a', 'm1')), ['message:2'])
+    assert.deepEqual(touched(chunk('agent_message_chunk', 'b', 'm1')), ['message:2'])
+    assert.deepEqual(touched(tool('tool_call', 't1', { status: 'pending' })), ['tool:t1'])
+    assert.deepEqual(touched(tool('tool_call_update', 't1', { status: 'completed' })), ['tool:t1'])
+    touched(acp('in', { id: 0, method: 'session/request_permission', params: { sessionId: 's1', toolCall: { toolCallId: 't2' }, options: [] } }))
+    assert.deepEqual(touched({ kind: 'approval', approval_id: 'ap_1', tool_call_id: 't2' }), ['approval:6'])
+    assert.deepEqual(touched({ kind: 'approval_resolved', approval_id: 'ap_1', resolution: 'approve', option_id: 'allow' }), ['approval:6'])
+    touched(acp('in', { id: 1, method: 'elicitation/create', params: { message: 'Pick', requestedSchema: {} } }))
+    touched({ kind: 'question', question_id: 'qu_1' })
+    assert.deepEqual(touched({ kind: 'question_resolved', question_id: 'qu_1', action: 'accept' }), ['question:7'])
+    assert.deepEqual(touched({ kind: 'state', state: 'IDLE', cancelling: false }), [])
+    assert.deepEqual(touched(finished(1)), ['turn:1'])
+  })
+
+  test('U259 the turn in progress outlives the window; its prompt keeps the response and the divider its result', () => {
+    const replies = Array.from({ length: 5 }, (_, i) => chunk('agent_message_chunk', `r${i}`, `m${i}`))
+    const { view } = limited(2, started(1), promptOut(1), ...replies, tool('tool_call', 't1'), promptDone(1), finished(1))
+    const prompt = item(view, 'prompt:1')
+    assert.deepEqual(prompt.data.result, { stopReason: 'end_turn', usage: { totalTokens: 5 } })
+    assert.ok([...ofKind(view, 'message'), ...ofKind(view, 'tool')].every(i => i.turn_id === 1))
+    assert.equal(ofKind(view, 'message').length, 5)
+    assert.deepEqual(ofKind(view, 'raw'), [])
+    assert.deepEqual([item(view, 'turn:1').data.stopReason, item(view, 'turn:1').data.usage], ['end_turn', { totalTokens: 5 }])
+    // The next turn's messages push the finished one out
+    applyActivity(view, 100, started(2))
+    applyActivity(view, 101, promptOut(2))
+    applyActivity(view, 102, chunk('agent_message_chunk', 'next', 'n1'))
+    assert.ok(view.items.every(i => i.turn_id === 2))
+  })
+
+  test('U273 a turn still open at close ends with a closed divider; the replay after reconnect is not taken into it', () => {
+    for (const reason of ['closed', 'exited'] as const) {
+      const { view } = limited(4, started(1), promptOut(1), chunk('agent_message_chunk', 'a', 'm1'), chunk('agent_message_chunk', 'b', 'm2'), { kind: 'session_closed', reason })
+      const divider = item(view, 'turn:1')
+      assert.deepEqual([divider.data.outcome, divider.data.reason], ['closed', reason])
+      const replay = Array.from({ length: 3 }, (_, i) => [chunk('user_message_chunk', `u${i}`, `u${i}`), chunk('agent_message_chunk', `a${i}`, `a${i}`)]).flat()
+      const removed = [{ ...OPENED, reconnected: true }, ...replay].flatMap((activity, index) => applyActivity(view, 100 + index, activity).changes.removed)
+      assert.ok(view.items.filter(i => i.kind === 'user_message' || i.kind === 'message').every(i => i.turn_id === null))
+      assert.ok(['prompt:1', 'message:2', 'message:3', 'turn:1'].every(id => removed.includes(id)), JSON.stringify(removed))
+    }
+    // A finished turn gets no second divider
+    const { view } = limited(5000, ...firstTurn, { kind: 'session_closed', reason: 'closed' })
+    assert.equal(ofKind(view, 'turn').length, 1)
   })
 })
 
@@ -505,5 +597,15 @@ describe('transcript: platform parsers', () => {
     const quota = { token_count: { totalTokens: 18630, inputTokens: 449, cachedInputTokens: 18176, cacheWriteInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 0 } }
     const codex = feedAs('codex', started(1), prompt(1), acp('in', { id: 1, result: { stopReason: 'end_turn', _meta: { quota } } }), finished(1))
     assert.deepEqual(item(codex, 'turn:1').data.usage, { totalTokens: 18630, inputTokens: 449, outputTokens: 5, cachedReadTokens: 18176, cachedWriteTokens: 0, thoughtTokens: 0 })
+  })
+
+  test('U268 a finished turn carries its duration from the prompt item; none without that item', () => {
+    const view = createConversation('mcp-1', 'grok_s1', OPENED, 5000)
+    applyActivity(view, 1000, started(1))
+    applyActivity(view, 1500, prompt(1))
+    applyActivity(view, 84000, finished(1))
+    assert.equal(item(view, 'turn:1').data.duration_ms, 83000)
+    const orphan = feed(finished(7))
+    assert.equal(item(orphan, 'turn:7').data.duration_ms, undefined)
   })
 })

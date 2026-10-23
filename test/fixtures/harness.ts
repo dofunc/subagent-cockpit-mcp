@@ -12,6 +12,7 @@ import type { CommandSpec } from '../../src/adapter/adapter'
 import { AntigravityAdapter } from '../../src/adapter/antigravity-adapter'
 import { ClaudeAdapter } from '../../src/adapter/claude-adapter'
 import { CodexAdapter } from '../../src/adapter/codex-adapter'
+import { ConversationStore } from '../../src/conversation-store'
 import '../../src/adapter/grok-adapter'
 import '../../src/adapter/opencode-adapter'
 import type { Store } from '../../src/host/host'
@@ -119,6 +120,8 @@ export interface Harness {
   host: NodeHost
   config: AppConfig
   manager: SessionManager
+  /** Listens to manager from setup on, as cli.ts wires it */
+  store: ConversationStore
   scriptPath(name: string): string
   setScript(name: string, script: Script): Promise<void>
   /** Replace the fake agy script; processes started afterwards read the new one */
@@ -131,6 +134,8 @@ export interface Harness {
 export interface HarnessOptions {
   scripts?: Record<string, Script>
   idle?: AppConfig['idle']
+  /** Message limits of snapshot (default 1 MB and 5000) */
+  snapshot?: Partial<AppConfig['snapshot']>
   /**
    * Adapter of every scripted subagent (default codex). grok and opencode run the real adapter with a fake program,
    * antigravity runs the bridge from source over the fake agy.
@@ -172,7 +177,8 @@ export async function setup(opts: HarnessOptions = {}): Promise<Harness> {
   const config: AppConfig = {
     idle: opts.idle ?? { timeout: 0 },
     // Second guard after SUBAGENT_COCKPIT_WEBUI_PORT=0: tests never reach the user's webui
-    webui: { port: 0 },
+    webui: { port: 0, truncate_message_size: 1_048_576, max_message_count: 5000 },
+    snapshot: { truncate_message_size: 1_048_576, max_message_count: 5000, ...opts.snapshot },
     profiles: opts.profiles ?? {},
     subagents: Object.fromEntries(Object.keys(scripts).map(name => [
       name,
@@ -184,6 +190,7 @@ export async function setup(opts: HarnessOptions = {}): Promise<Harness> {
   await writeFile(join(home, 'config.json'), JSON.stringify(config))
   const host = new NodeHost()
   const manager = new SessionManager(host, config, home)
+  const store = new ConversationStore(manager, config.snapshot, host)
   const log = async () => {
     const text = await readFile(logPath, 'utf-8').catch(() => '')
     return text.trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
@@ -195,6 +202,7 @@ export async function setup(opts: HarnessOptions = {}): Promise<Harness> {
     host,
     config,
     manager,
+    store,
     scriptPath,
     setScript: (name, s) => writeFile(scriptPath(name), JSON.stringify(s)),
     setAgy: s => writeFile(agyPath, JSON.stringify(s)),

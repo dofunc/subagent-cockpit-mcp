@@ -1,8 +1,12 @@
 import { spawn } from 'node:child_process'
 import type { Host } from '../host/host'
 import type { SessionActivity, SessionManager } from '../session/session-manager'
-import type { McpToWebui, ConversationActivity, WebuiPingResult } from '../types'
-import { WEBUI_MESSAGE_LIMIT, WEBUI_NAME, WEBUI_PROTOCOL } from './protocol'
+import type { AppConfig, McpToWebui, WebuiPingResult } from '../types'
+import { WEBUI_NAME, WEBUI_PROTOCOL } from './protocol'
+import { truncateActivity } from './truncate'
+
+/** What the link applies: its own message size limit, and the message count a webui it starts keeps */
+type WebuiLimits = Pick<AppConfig['webui'], 'truncate_message_size' | 'max_message_count'>
 
 const PROBE_TIMEOUT_MS = 1000
 const SPAWN_POLL_MS = 200
@@ -24,7 +28,13 @@ export class WebuiLink {
   private announced = false
   private readonly startedAt: number
 
-  constructor(private readonly host: Host, private readonly manager: SessionManager, private readonly port: number, private readonly version: string) {
+  constructor(
+    private readonly host: Host,
+    private readonly manager: SessionManager,
+    private readonly port: number,
+    private readonly version: string,
+    private readonly limits: WebuiLimits,
+  ) {
     this.startedAt = host.clock.now()
   }
 
@@ -97,9 +107,10 @@ export class WebuiLink {
     return this.host.clock.now() < deadline && this.awaitWebui(deadline)
   }
 
-  /** Detached from this process group, so the webui outlives the MCP client's terminal. */
+  /** Detached from this process group, so the webui outlives the MCP client's terminal. It keeps this server's message count. */
   private spawnWebui(): void {
-    const child = spawn(process.execPath, [this.host.bundledPath('webui.js'), '--port', String(this.port)], { detached: true, stdio: 'ignore' })
+    const args = [this.host.bundledPath('webui.js'), '--port', String(this.port), '--max-message-count', String(this.limits.max_message_count)]
+    const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore' })
     child.on('error', err => this.host.log(`webui: start failed: ${err.message}`))
     child.unref()
   }
@@ -129,16 +140,6 @@ export class WebuiLink {
   }
 
   private toMessage({ session, activity }: SessionActivity): McpToWebui {
-    return { type: 'activity', session, at: this.host.clock.now(), activity: this.toConversationActivity(activity) }
-  }
-
-  /** An ACP message travels as plain JSON; one over WEBUI_MESSAGE_LIMIT bytes is replaced by a marker. */
-  private toConversationActivity(activity: SessionActivity['activity']): ConversationActivity {
-    if (activity.kind !== 'acp') return activity
-    const { direction, message } = activity
-    const text = JSON.stringify(message)
-    const bytes = Buffer.byteLength(text)
-    if (bytes <= WEBUI_MESSAGE_LIMIT) return { kind: 'acp', direction, message: JSON.parse(text) }
-    return { kind: 'acp', direction, message: { truncated: true, bytes, method: 'method' in message ? message.method : null, id: 'id' in message ? message.id : null } }
+    return { type: 'activity', session, at: this.host.clock.now(), activity: truncateActivity(activity, this.limits.truncate_message_size) }
   }
 }

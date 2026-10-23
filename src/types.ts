@@ -41,8 +41,14 @@ export type ProfileConfig = Partial<Pick<SubagentConfig, 'role' | 'model' | 'rea
 export interface AppConfig {
   /** Seconds an IDLE session may stay open before it is closed; 0 never closes. */
   idle: { timeout: number }
-  /** Port of the shared webui on 127.0.0.1; 0 turns it off. SUBAGENT_COCKPIT_WEBUI_PORT takes precedence. */
-  webui: { port: number }
+  /**
+   * Port of the shared webui on 127.0.0.1; 0 turns it off. SUBAGENT_COCKPIT_WEBUI_PORT takes precedence.
+   * An ACP message over truncate_message_size bytes goes to the webui as a truncated stand-in; the webui keeps
+   * max_message_count messages per session, as passed by the MCP server that starts it.
+   */
+  webui: { port: number; truncate_message_size: number; max_message_count: number }
+  /** The same limits for the conversation `snapshot` returns, kept apart from the webui's */
+  snapshot: { truncate_message_size: number; max_message_count: number }
   profiles: Record<string, ProfileConfig>
   /** As written in config.json; resolveSubagent() applies the profile and defaults. */
   subagents: Record<string, Partial<SubagentConfig>>
@@ -58,10 +64,15 @@ export interface OpenParams {
   role?: string
 }
 
+/** `snapshot` params. Applied in order: session, since, types, exclude_types, then last. */
 export interface SnapshotParams {
+  session?: string
   since?: number
   server_id?: string
   ack?: string[]
+  types?: ConversationItemKind[]
+  exclude_types?: ConversationItemKind[]
+  last?: number
 }
 
 // ── Tool results ──
@@ -152,6 +163,8 @@ export interface OpenResult extends PromptResult {
   session: string
   reused: boolean
   config_options: ConfigOptionInfo[]
+  /** reuse found a closed session but could not reconnect it, so this is a new one */
+  reuse_skipped?: { session: string; code: ErrorCode; message: string }
 }
 
 export interface SetConfigResult {
@@ -234,29 +247,6 @@ export interface DeleteResult {
 
 // ── Snapshot ──
 
-export interface ToolCallView {
-  tool_call_id: string
-  title: string
-  kind: string | null
-  status: string | null
-}
-
-export interface SessionEvent {
-  seq: number
-  turn_id: number | null
-  replay: boolean
-  type: string
-  text?: string
-  tool_call?: ToolCallView
-  plan?: PlanEntryInfo[]
-}
-
-export interface SessionView {
-  turn_id: number | null
-  output: string
-  tool_calls: ToolCallView[]
-}
-
 export interface NotificationItem {
   key: string
   type: 'turn' | 'approval' | 'question'
@@ -266,16 +256,26 @@ export interface NotificationItem {
   question?: QuestionInfo
 }
 
-/** UI clients read it as data, so it carries the feedback too; it never reaches a model's context. */
-export interface SessionSnapshot extends SessionState, ProgressResult {
+/** One conversation entry as `snapshot` returns it: the webui item without its protocol log refs. */
+export interface SnapshotItem extends Omit<ConversationItem, 'log'> {
+  /** Revision of the last change; compare with `since` */
+  rev: number
+}
+
+/** State, feedback and notifications from SessionManager; the MCP layer adds the conversation items. */
+export interface SessionSnapshotBase extends SessionState, ProgressResult {
   config_options: ConfigOptionInfo[]
   notifications: NotificationItem[]
-  events: SessionEvent[]
-  view?: SessionView
+}
+
+/** One session of `snapshot`: its state and feedback, and the conversation the webui shows for it. */
+export interface SessionSnapshot extends SessionSnapshotBase {
+  items: SnapshotItem[]
 }
 
 export interface SnapshotResult {
   server_id: string
+  /** Latest item revision; pass it back as `since` */
   seq: number
   reset: boolean
   sessions: SessionSnapshot[]
@@ -293,7 +293,7 @@ export interface AcpWireMessage {
   error?: { code: number; message: string; data?: JsonValue }
 }
 
-/** Stand-in for an ACP message over WEBUI_MESSAGE_LIMIT bytes. */
+/** Stand-in for an ACP message over the configured truncate_message_size bytes. */
 export interface TruncatedMessage { truncated: true; bytes: number; method: string | null; id: string | number | null }
 
 export type ApprovalResolution = 'approve' | 'allow' | 'reject' | 'cancelled'
@@ -351,7 +351,13 @@ export interface ConversationItem {
 
 export interface MessageLogEntry { seq: number; at: number; direction: 'in' | 'out'; message: AcpWireMessage | TruncatedMessage }
 
-/** One session as the webui holds it. Not the MCP `snapshot` SessionView. */
+/** Items one applyActivity call created or changed, and removed; snapshot's revisions come from it. */
+export interface ConversationChanges {
+  touched: string[]
+  removed: string[]
+}
+
+/** One session as the webui and the MCP layer's ConversationStore hold it. */
 export interface Conversation {
   session: string
   mcp_id: string
@@ -374,11 +380,16 @@ export interface Conversation {
    */
   requests: Record<string, string>
   version: number
+  /** Protocol log entries kept; past it the oldest go, and the items nothing kept backs go with them */
+  max_messages: number
+  /** What the last applyActivity did to the items */
+  changes: ConversationChanges
 }
 
 /** webui -> browser over SSE: event name -> data. */
 export interface ConversationStreamEvents {
-  init: { mcps: McpInfo[]; sessions: Conversation[] }
+  /** max_messages is the webui's limit, for the sessions the browser creates later */
+  init: { mcps: McpInfo[]; sessions: Array<Omit<Conversation, 'changes'>>; max_messages: number }
   mcp_connected: McpInfo
   mcp_updated: McpInfo
   mcp_disconnected: { mcp_id: string }

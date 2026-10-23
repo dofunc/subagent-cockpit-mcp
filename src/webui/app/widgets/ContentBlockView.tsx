@@ -11,7 +11,7 @@ interface ContentBlockViewProps {
   block: JsonValue
   /** The block may still grow: markdown renders its unfinished tail as it streams */
   streaming?: boolean
-  /** Every newline breaks the line, for tool output that mixes markdown and plain command output */
+  /** Every newline breaks the line, as in the terminal; on by default */
   breaks?: boolean
 }
 
@@ -21,14 +21,14 @@ interface MarkdownProps {
   breaks?: boolean
 }
 
-/** Markdown in the page's light or dark theme. */
-export function Markdown({ content, streaming = false, breaks = false }: MarkdownProps) {
+/** Markdown in the page's light or dark theme. A single newline breaks the line unless `breaks` is false. */
+export function Markdown({ content, streaming = false, breaks = true }: MarkdownProps) {
   const { dark } = usePreferences()
   return <XMarkdown className={dark ? 'x-markdown-dark' : 'x-markdown-light'} content={content} streaming={{ hasNextChunk: streaming }} config={{ breaks }} />
 }
 
 /** One ACP content block: text, image, audio, resource_link or resource; anything else as a key/value list. */
-export default function ContentBlockView({ block, streaming = false, breaks = false }: ContentBlockViewProps) {
+export default function ContentBlockView({ block, streaming = false, breaks = true }: ContentBlockViewProps) {
   const { t } = usePreferences()
   const fields = obj(block)
   const mimeType = text(fields.mimeType)

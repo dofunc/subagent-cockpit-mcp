@@ -30,6 +30,7 @@ Open `http://127.0.0.1:7200` to watch the sessions: replies as they stream, tool
 - Memory only. Nothing is written to disk. A web UI started again shows the sessions that are still open, not the old messages.
 - Port. `"webui": { "port": 7200 }` in the config, or `SUBAGENT_COCKPIT_WEBUI_PORT`, which wins. `0` turns it off. When another program holds the port, the server says so on stderr and runs without the web UI.
 - Privacy. The page shows the ACP messages as sent, prompts and `args` included. It listens on 127.0.0.1 only, but other users of the same machine can open it.
+- Font. The conversation tab is monospace. Install [Sarasa Mono SC](https://github.com/be5invis/Sarasa-Gothic) (or Noto Sans Mono CJK SC) and Chinese lines up with Latin text at exactly two columns per character; without it Chinese falls back to the system font.
 
 ## Quick start
 
@@ -106,11 +107,23 @@ Verified with codex 0.162.1, claude 2.1.292, grok 1.0.46, opencode 2.0.30 and ag
 | Prompt | `prompt` sends a task, `cancel` stops the turn, `output` returns the last reply |
 | Approvals | `approve` allows once, `allow` allows similar calls for the rest of the session, `reject` refuses |
 | Questions | `answer` accepts, declines or cancels a question from the agent |
-| Snapshot | `status` shows the state and what is pending, `progress` the agent's plan and context usage, `snapshot` every session at once for UIs |
+| Snapshot | `status` shows the state and what is pending, `progress` the agent's plan and context usage, `snapshot` the full conversation |
 | Sessions | `open` creates, reuses or reconnects, `close` keeps the history, `delete` removes it, `sessions` lists them |
 | Config | `subagents` lists the configured agents, `set_config` changes `model`, `reasoning_effort` or `mode` |
 
 `prompt`, `approve`, `allow`, `reject` and `answer` wait as long as the turn takes and return `done` with the output, `approval_needed` or `question_needed`. Pass `wait: false` to return right away. The server never times out a turn. If your client gives up first, the turn keeps running, and `status` and `output` pick it up.
+
+`open` with `reuse: true` takes an idle session of this server with the same `cwd` and subagent, else reconnects the latest closed one on disk. If that one cannot be reconnected, you get a new session and a `reuse_skipped` note, and the broken one is not picked again.
+
+`snapshot` returns the conversation exactly as the Web UI shows it: prompts, replies, thinking, tool calls with their input, output and diffs, plans, approvals, questions and agent-specific messages, one item each, plus every session's state and pending notifications. Narrow it down when you only need part of it:
+
+```json
+{ "session": "codex_019a…", "types": ["tool"], "last": 5 }
+{ "session": "codex_019a…", "exclude_types": ["thought", "raw"] }
+{ "since": 1287, "server_id": "f3c1…" }
+```
+
+`types` keeps and `exclude_types` drops item kinds (`prompt`, `message`, `thought`, `tool`, `plan`, `turn` and the rest), `last` takes the last few, and `since` with the `seq` and `server_id` of the previous call returns only what changed. `reset: true` means start over from the items returned.
 
 ## Configuration
 
@@ -136,7 +149,18 @@ Verified with codex 0.162.1, claude 2.1.292, grok 1.0.46, opencode 2.0.30 and ag
 }
 ```
 
-A `subagents` object you write replaces the default entries as a whole. `idle.timeout` closes sessions idle that many seconds. The default `0` never closes them, since the server and its agents exit with your MCP client anyway. `webui.port` is the [Web UI](#web-ui) port, `0` for none. `SUBAGENT_COCKPIT_HOME` moves the whole `~/.subagent-cockpit` directory.
+A `subagents` object you write replaces the default entries as a whole. `idle.timeout` closes sessions idle that many seconds. The default `0` never closes them, since the server and its agents exit with your MCP client anyway. A session closed this way comes back by itself on the next `prompt` or `set_config`, settings included; `status` meanwhile reports it `CLOSED`. `webui.port` is the [Web UI](#web-ui) port, `0` for none. `SUBAGENT_COCKPIT_HOME` moves the whole `~/.subagent-cockpit` directory.
+
+The Web UI and `snapshot` keep the latest 5000 ACP messages per session, and show any message over 1 MB (1048576 bytes) as a truncation marker. Each has its own setting, in bytes and counts:
+
+```json
+{
+  "webui": { "port": 7200, "truncate_message_size": 1048576, "max_message_count": 5000 },
+  "snapshot": { "truncate_message_size": 1048576, "max_message_count": 5000 }
+}
+```
+
+Conversation items go with the messages behind them. The Web UI keeps the `max_message_count` of the server that started it.
 
 | Field | Meaning |
 |---|---|

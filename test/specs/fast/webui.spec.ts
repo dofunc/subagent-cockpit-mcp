@@ -1,6 +1,8 @@
+import { readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
-import { killWebuis, webuiUp } from '../../fixtures/browser'
+import { killWebuis, snapshot, webuiUp } from '../../fixtures/browser'
 import { freePort, startServer } from '../../fixtures/e2e'
 import type { Server } from '../../fixtures/e2e'
 import { setup } from '../../fixtures/harness'
@@ -17,9 +19,12 @@ interface Cockpit {
   open(role?: string): Promise<string>
 }
 
-/** One MCP server on its own home and webui port, with the page open on that webui. */
-async function withCockpit(page: Page, scripts: HarnessOptions['scripts'], fn: (c: Cockpit) => Promise<void>): Promise<void> {
+/** One MCP server on its own home and webui port, with the page open on that webui. `webui` adds to the config's webui section. */
+async function withCockpit(page: Page, scripts: HarnessOptions['scripts'], fn: (c: Cockpit) => Promise<void>, webui: Record<string, number> = {}): Promise<void> {
   const h = await setup({ adapter: 'grok', scripts })
+  const configPath = join(h.home, 'config.json')
+  const config = JSON.parse(await readFile(configPath, 'utf-8'))
+  await writeFile(configPath, JSON.stringify({ ...config, webui: { ...config.webui, ...webui } }))
   const port = await freePort()
   const server = await startServer(h.home, port)
   const call = async (name: string, args: Record<string, unknown> = {}) => {
@@ -174,5 +179,22 @@ test.describe('fast: webui with MCP tools', () => {
       await log.getByRole('row').filter({ hasText: /session\/prompt #\d+/ }).filter({ hasText: 'write the log' }).getByRole('button', { name: /expand row/i }).click()
       await expect(log.getByText(/"text": "write the log"/)).toBeVisible()
     })
+  })
+
+  test('F8 a page opened before any session keeps the webui\'s message limit', async ({ page }) => {
+    await withCockpit(page, { agent: { turns: [[{ chunks: 50 }]] } }, async ({ port, open, call }) => {
+      const session = await open('You keep things short.')
+      await expect(conversation(page).getByText('role prompt')).toBeVisible()
+      await call('prompt', { session, text: 'count' })
+      await page.getByRole('tab', { name: 'Protocol log' }).click()
+      await expect(page.getByRole('tabpanel', { name: 'Protocol log' }).locator('tr.ant-table-row')).toHaveCount(30)
+      await page.getByRole('tab', { name: 'Conversation' }).click()
+      // The role prompt's messages are gone, so is its turn; the page and the webui process agree
+      await expect(conversation(page).getByText('role prompt')).toHaveCount(0)
+      const held = (await snapshot(port)).sessions.find(s => s.session === session)
+      expect(held?.log.length).toBe(30)
+      expect(held?.items.some(item => item.kind === 'prompt' && item.data.internal === true)).toBe(false)
+      await expect(conversation(page).getByRole('separator')).toHaveCount(held?.items.filter(item => item.kind === 'turn').length ?? -1)
+    }, { max_message_count: 30 })
   })
 })

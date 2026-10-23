@@ -17,9 +17,13 @@ const SUBAGENT_DEFAULTS: SubagentConfig = {
   env: {},
 }
 
+/** 1 MB per ACP message and 5000 messages per session, the same for the webui and snapshot */
+const LIMITS = { truncate_message_size: 1_048_576, max_message_count: 5000 }
+
 export const DEFAULT_CONFIG: AppConfig = {
   idle: { timeout: 0 },
-  webui: { port: 7200 },
+  webui: { port: 7200, ...LIMITS },
+  snapshot: { ...LIMITS },
   profiles: {},
   subagents: {
     codex: { ...SUBAGENT_DEFAULTS, adapter: 'codex', description: 'OpenAI Codex' },
@@ -30,12 +34,16 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
 }
 
+/** Message limits as written, checked by loadConfig */
+type RawLimits = Partial<Record<keyof typeof LIMITS, JsonValue>>
+
 /** An entry as written in config.json: env values may be any JSON value. */
 type RawEntry<T> = Omit<T, 'env'> & { env?: Record<string, JsonValue> }
 
 interface RawConfig {
   idle?: Partial<AppConfig['idle']>
-  webui?: Partial<AppConfig['webui']>
+  webui?: { port?: number } & RawLimits
+  snapshot?: RawLimits
   profiles?: Record<string, RawEntry<ProfileConfig>>
   subagents?: Record<string, RawEntry<Partial<SubagentConfig>>>
 }
@@ -72,22 +80,40 @@ function withEnvRefs<E extends { env?: Record<string, JsonValue> }>(host: Host, 
   ]))
 }
 
+/** A size or count from config.json: the default when missing, else a positive safe integer. Throws otherwise. */
+function positiveInt(value: JsonValue | undefined, path: string, fallback: number): number {
+  if (value === undefined) return fallback
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value
+  throw new Error(`Invalid config: ${path} must be a positive integer, got ${JSON.stringify(value)}`)
+}
+
+/** Both limits of one section; `section` names it in errors. */
+function limits(raw: RawLimits | undefined, section: string): typeof LIMITS {
+  return {
+    truncate_message_size: positiveInt(raw?.truncate_message_size, `${section}.truncate_message_size`, LIMITS.truncate_message_size),
+    max_message_count: positiveInt(raw?.max_message_count, `${section}.max_message_count`, LIMITS.max_message_count),
+  }
+}
+
 /**
- * Load <home>/config.json, creating it with defaults on first run.
- * Entries are kept as written (env values resolved to strings); resolveSubagent() applies profiles and defaults.
- * Unknown fields are ignored.
+ * Load <home>/config.json, creating it with defaults on first run. The first file leaves the message limits
+ * out to stay short; they take their defaults. Entries are kept as written (env values resolved to strings);
+ * resolveSubagent() applies profiles and defaults. Unknown fields are ignored. Throws on a limit that is not a
+ * positive integer.
  */
 export async function loadConfig(host: Host, home: string): Promise<AppConfig> {
   const path = host.store.join(home, 'config.json')
   if (!await host.store.exists(path)) {
+    const { idle, webui, profiles, subagents } = DEFAULT_CONFIG
     await host.store.mkdir(home)
-    await host.store.writeText(path, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`)
+    await host.store.writeText(path, `${JSON.stringify({ idle, webui: { port: webui.port }, profiles, subagents }, null, 2)}\n`)
     host.log(`Created default config: ${path}`)
   }
   const raw: RawConfig = JSON.parse(await host.store.readText(path))
   return {
     idle: { timeout: raw.idle?.timeout ?? DEFAULT_CONFIG.idle.timeout },
-    webui: { port: raw.webui?.port ?? DEFAULT_CONFIG.webui.port },
+    webui: { port: raw.webui?.port ?? DEFAULT_CONFIG.webui.port, ...limits(raw.webui, 'webui') },
+    snapshot: limits(raw.snapshot, 'snapshot'),
     profiles: withEnvRefs(host, raw.profiles ?? DEFAULT_CONFIG.profiles),
     subagents: withEnvRefs(host, raw.subagents ?? DEFAULT_CONFIG.subagents),
   }

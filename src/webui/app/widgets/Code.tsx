@@ -12,11 +12,25 @@ interface CodeProps {
   children: string
 }
 
-/** CodeHighlighter always paints oneLight; this follows the page's light or dark theme. */
+/**
+ * CodeHighlighter always paints oneLight; this follows the page's light or dark theme. The Prism theme fixes
+ * its font on pre and code, so the conversation tab's font variable wins there, and the theme's font elsewhere.
+ */
 export default function Code({ lang, header, highlightProps, children }: CodeProps) {
   const { dark } = usePreferences()
+  const style = dark ? oneDark : oneLight
+  const fontFamily = `var(--cockpit-conversation-font, ${style['pre[class*="language-"]']?.fontFamily ?? 'monospace'})`
   return (
-    <CodeHighlighter lang={lang} header={header} highlightProps={{ ...highlightProps, style: dark ? oneDark : oneLight, customStyle: { margin: 0 } }}>
+    <CodeHighlighter
+      lang={lang}
+      header={header}
+      highlightProps={{
+        ...highlightProps,
+        style,
+        customStyle: { margin: 0, fontFamily },
+        codeTagProps: { style: { ...style['code[class*="language-"]'], fontFamily } },
+      }}
+    >
       {children}
     </CodeHighlighter>
   )

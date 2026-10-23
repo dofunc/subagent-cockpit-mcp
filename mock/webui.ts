@@ -142,13 +142,19 @@ class Script {
     return this.respond('in', created, replay ? result : { sessionId: this.nativeId, ...result })
   }
 
-  /** A prompt turn: `body` produces the agent's output, `end` how the turn ends. */
-  /** `end.result` replaces the standard prompt result, for agents that report usage elsewhere. */
-  turn(prompt: JsonValue[], body: () => void, end: { internal?: boolean; stop?: string; error?: string; result?: JsonObject } = {}): this {
+  /**
+   * A prompt turn: `body` produces the agent's output, `end` how the turn ends. `end.result` replaces the
+   * standard prompt result, for agents that report usage elsewhere; `end.duration` sets the turn's length in ms.
+   */
+  turn(prompt: JsonValue[], body: () => void, end: { internal?: boolean; stop?: string; error?: string; result?: JsonObject; duration?: number } = {}): this {
     const turnId = ++clock.turn
-    this.act({ kind: 'turn_started', turn_id: turnId, internal: end.internal ?? false }).state('RUNNING')
+    this.act({ kind: 'turn_started', turn_id: turnId, internal: end.internal ?? false })
+    const started = clock.now
+    this.state('RUNNING')
     const id = this.request('out', 'session/prompt', { sessionId: this.nativeId, prompt })
     body()
+    // The next tick lands the response, and turn_finished one tick after it, on the requested length
+    end.duration !== undefined && (clock.now = started + end.duration - 1400)
     if (end.error) {
       this.fail('in', id, { code: -32603, message: 'Internal error', data: { details: end.error } })
       this.act({ kind: 'turn_finished', turn_id: turnId, outcome: 'error', error: 'Internal error' })
@@ -530,6 +536,69 @@ function inspector(): Script {
   return s.close('idle')
 }
 
+/** codex `Coder` again: a tool title that wraps, single newlines in a reply, a thought and a plan, and turn lengths. */
+function tidier(): Script {
+  const s = new Script('mcp-a', 'codex', '019a6e55-3c8d-7a21-b4f0-6d2e9c1a7b38')
+  s.open('Coder', '/Users/dev/repo').setup(CODEX.info, CODEX.capabilities, CODEX.auth, CODEX.session, '/Users/dev/repo')
+  s.turn([text('Tidy the changelog entries.')], () => {
+    s.say('The entries mix tenses.\nPast tense reads better in a changelog.', null, 400, 'agent_thought_chunk')
+    s.update({ sessionUpdate: 'plan_update', plan: { type: 'markdown', planId: 'tidy', content: 'Rewrite the entries in past tense.\nSort them by area.' } })
+    s.tool('call_scan', {
+      title: 'Search CHANGELOG.md for entries that mention the billing migration, the navbar overflow fix, the auth middleware changes and the release workflow so they can be grouped by area',
+      kind: 'search', status: 'completed', rawInput: { pattern: 'billing|navbar|auth|release', path: 'CHANGELOG.md' }, rawOutput: { matches: 9 },
+    })
+    s.tool('call_open', { title: 'Read CHANGELOG.md', kind: 'read', status: 'completed', rawInput: { path: 'CHANGELOG.md' }, rawOutput: { bytes: 2048 } })
+    s.say('Rewrote 9 entries.\nGrouped them under Billing, UI and Auth.\n\n```text\n- Fixed the navbar overflow\n- Moved billing to the v2 client\n```', 't1')
+  }, { duration: 83_000 })
+  s.turn([text('Check the dates.')], () => s.say('The dates are in order.', 't2'), { duration: 8_200 })
+  return s
+}
+
+const CJK_SUMMARY = [
+  '已在 POST 与 PATCH 路由加入校验，错误返回 **400** 和字段列表。',
+  '',
+  '| 文件 | 改动 |',
+  '|---|---|',
+  '| `src/api/users.ts` | 保存前调用 `validateUser` |',
+  '| `src/api/validate.ts` | 新增，校验 `email` 与 `name` |',
+  '',
+  '```ts',
+  'export function validateUser(input: Partial<User>): string[] {',
+  '  const errors: string[] = []',
+  '  // 名称不超过 80 个字符',
+  '  if ((input.name ?? \'\').length > 80) errors.push(\'name\')',
+  '  return errors',
+  '}',
+  '```',
+].join('\n')
+
+/** codex `Translator`: Chinese and Japanese mixed with code, for the monospace conversation font. */
+function translator(): Script {
+  const s = new Script('mcp-a', 'codex', '019a6f71-8d2e-7b45-a3c1-2e9f4d6b8a50')
+  s.open('Translator', '/Users/dev/repo').setup(CODEX.info, CODEX.capabilities, CODEX.auth, CODEX.session, '/Users/dev/repo')
+  s.turn([text('把 src/api/users.ts 的输入校验补齐，并补上测试。')], () => {
+    s.say('路由直接写入请求体。\n先读处理函数，再在 `db.users.insert` 之前接入校验。', null, 400, 'agent_thought_chunk')
+    s.tool('call_zh_read', { title: '读取 src/api/users.ts 的校验逻辑', kind: 'read', status: 'completed', rawInput: { path: 'src/api/users.ts' }, rawOutput: { bytes: 96 } })
+    s.say(CJK_SUMMARY, 'z1')
+  }, { duration: 41_500 })
+  s.turn([text('請同步更新繁體中文的說明文件。')], () => {
+    s.tool('call_hant_edit', { title: '編輯 docs/zh-HK/users.md', kind: 'edit', status: 'completed', content: [{ type: 'diff', path: '/Users/dev/repo/docs/zh-HK/users.md', oldText: '用戶名稱沒有長度限制。\n', newText: '用戶名稱不得超過 80 個字元。\n' }] })
+    s.say('已更新用戶資料的檢查說明，並補充電郵格式的規則。\n軟件版本記錄同步修改。', 'h1')
+  }, { duration: 12_300 })
+  s.turn([text('日本語のエラーメッセージも追加してください。')], () => {
+    s.say('`validateUser` にバリデーションを追加しました。\nメールアドレスと名前（80 文字以内）を確認します。', 'j1')
+  }, { duration: 6_800 })
+  return s
+}
+
+/** opencode `Builder`: the agent exits in the middle of a turn, which ends with a closed divider (W14). */
+function crashed(): Script {
+  const s = new Script('mcp-a', 'opencode', 'ses_4f2a9c1e7b3d')
+  s.open('Builder', '/Users/dev/repo').setup(OPENCODE.info, OPENCODE.capabilities, OPENCODE.auth, OPENCODE.session, '/Users/dev/repo')
+  s.openTurn([text('Build the docs site.')], () => s.say('Running the build…', 'b1'))
+  return s.close('exited')
+}
+
 /** A short finished session, for the list's ended states. */
 function short(mcp: string, adapter: string, nativeId: string, subagent: string, agent: AgentFixture, prompt: string, end: 'closed' | 'shutdown' | 'exited' | 'deleted' | null): Script {
   const s = new Script(mcp, adapter, nativeId)
@@ -547,6 +616,9 @@ function scripts(): Script[] {
     planner(),
     releaser(),
     inspector(),
+    tidier(),
+    translator(),
+    crashed(),
     short('mcp-a', 'antigravity', '9e1c4f2a-agy', 'Writer', AGY, 'Draft release notes', 'closed'),
     short('mcp-a', 'codex', '019a6b11-0c2d-7e44-8b1a-5f3e9d2c1a07', 'Cleanup', CODEX, 'Remove dead feature flags', 'deleted'),
     short('mcp-b', 'codex', '019a6d40-2e7b-7f10-9c3d-8a1b5e6f2c94', 'Coder', CODEX, 'Fix the navbar overflow', 'shutdown'),
@@ -594,7 +666,7 @@ async function connect({ pid, cwd, client }: FakeMcp): Promise<WebSocket> {
 async function main(): Promise<void> {
   // Whatever already listens may be the real webui: fake sessions must never reach it
   if (await ping()) throw new Error(`port ${PORT} is taken; set COCKPIT_MOCK_WEBUI_PORT to a free port`)
-  const webui = spawn(process.execPath, [WEBUI, '--port', String(PORT)], { stdio: 'inherit' })
+  const webui = spawn(process.execPath, [WEBUI, '--port', String(PORT), '--max-message-count', '5000'], { stdio: 'inherit' })
   process.once('exit', () => webui.kill())
   await awaitWebui(webui.pid, Date.now() + 5000)
 

@@ -65,3 +65,32 @@ describe('webui boundaries', () => {
     })
   }
 })
+
+describe('conversation store and truncation', () => {
+  const importOf = (from: string) => `import * as m from '${from}'\nexport const x = m\n`
+  const ALLOWED: Record<string, string[]> = {
+    'src/conversation-store.ts': ['./webui/transcript', './webui/truncate', 'node:buffer'],
+    'src/webui/link.ts': ['./truncate'],
+  }
+  const FORBIDDEN: Record<string, string[]> = {
+    'src/session/session-manager.ts': ['../conversation-store'],
+    'src/webui/transcript.ts': ['./truncate', '../conversation-store'],
+    'src/webui/app/App.tsx': ['../truncate', '../../conversation-store'],
+    'src/webui/server.ts': ['../conversation-store'],
+  }
+
+  for (const [path, imports] of Object.entries(ALLOWED)) {
+    test(`U258 ${path} may import ${imports.join(', ')}`, async () => {
+      const counts = await Promise.all(imports.map(from => restrictedImports(path, importOf(from))))
+      assert.deepEqual(counts, imports.map(() => 0))
+    })
+  }
+
+  for (const [path, imports] of Object.entries(FORBIDDEN)) {
+    for (const from of imports) {
+      test(`U258 ${path} must not import ${from}`, async () => {
+        assert.ok(await restrictedImports(path, importOf(from)) > 0)
+      })
+    }
+  }
+})
