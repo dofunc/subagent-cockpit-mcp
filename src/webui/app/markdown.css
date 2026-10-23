@@ -1,0 +1,5 @@
+/* x-markdown's themes fix the list marker at 16px / 28px; follow the compact text instead */
+.x-markdown li::marker {
+  font-size: inherit;
+  line-height: inherit;
+}

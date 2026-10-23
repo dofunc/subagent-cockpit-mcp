@@ -57,7 +57,11 @@ const MCPS: FakeMcp[] = [
 
 const text = (value: string) => ({ type: 'text', text: value })
 const chunks = (value: string, size: number) => value.match(new RegExp(`[\\s\\S]{1,${size}}`, 'g')) ?? []
-const usage = (input: number, output: number) => ({ inputTokens: input, outputTokens: output, thoughtTokens: Math.round(output / 3), cachedReadTokens: input * 2, totalTokens: input + output })
+// As claude and opencode report a turn: four fifths of the prompt read from the cache, inputTokens the rest
+const usage = (prompt: number, output: number) => {
+  const cached = Math.round(prompt * 0.8)
+  return { inputTokens: prompt - cached, outputTokens: output, thoughtTokens: Math.round(output / 3), cachedReadTokens: cached, cachedWriteTokens: 0, totalTokens: prompt + output }
+}
 
 /** One session's activity, in the order the webui would receive it. */
 class Script {

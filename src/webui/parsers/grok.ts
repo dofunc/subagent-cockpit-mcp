@@ -32,4 +32,25 @@ export const grok: TranscriptParser = {
     if (message.method === undefined) return {}
     return INTERNAL.test(message.method) ? {} : undefined
   },
+  /**
+   * grok leaves the standard usage out and reports the turn in `_meta`: its inputTokens include the cache
+   * reads, and the top-level total counts reasoning too. Cache creation is passed on as reported.
+   */
+  promptResult(result) {
+    const meta = obj(result._meta)
+    const usage = obj(meta.usage)
+    if (result.usage !== undefined || typeof usage.inputTokens !== 'number') return result
+    const cached = typeof usage.cachedReadTokens === 'number' ? usage.cachedReadTokens : 0
+    return {
+      ...result,
+      usage: {
+        totalTokens: meta.totalTokens ?? usage.totalTokens ?? null,
+        inputTokens: usage.inputTokens - cached,
+        outputTokens: usage.outputTokens ?? null,
+        cachedReadTokens: cached,
+        cachedWriteTokens: usage.cacheCreationTokens ?? null,
+        thoughtTokens: usage.reasoningTokens ?? null,
+      },
+    }
+  },
 }

@@ -3,7 +3,7 @@ import type { AdapterActivity, ApprovalVerb, SubagentAdapter } from '../adapter/
 import { resolveSubagent } from '../config'
 import type { Host, Timer } from '../host/host'
 import type {
-  AnswerAction, AnswerContent, AppConfig, CancelResult, CloseResult, ConfigOptionInfo, DeleteResult, ConversationActivity,
+  AnswerAction, AnswerContent, AppConfig, CancelResult, CloseResult, ConfigOptionInfo, ConfigValues, DeleteResult, ConversationActivity,
   OpenParams, OpenResult, OutputResult, ProgressResult, PromptResult, SessionCloseReason, SessionSnapshot,
   SessionState, SessionStatus, SessionSummary, SnapshotParams, SnapshotResult, SubagentConfig, SubagentInfo,
 } from '../types'
@@ -27,6 +27,8 @@ interface OpenSession {
 
 const NOTICE_KEY = /^(?<server>[^:]+):(?<session>[^:]+):(?<id>(?:turn|approval|question):.+)$/
 const LAST_PROMPT_LENGTH = 100
+
+const configValues = (configs: ConfigOptionInfo[]): ConfigValues => Object.fromEntries(configs.map(o => [o.id, o.current_value]))
 
 /**
  * Session registry for one MCP server process. The in-memory map is the source of truth and holds
@@ -189,6 +191,8 @@ export class SessionManager {
         cwd: record.cwd,
         role: record.role,
         resumeId: parsed.native,
+        // Records written before config was kept fall back to the subagent config
+        restore: record.config && Object.entries(record.config),
         signal,
         onEstablished: async () => {
           this.register(id, adapter, record.subagent, record.cwd)
@@ -219,6 +223,10 @@ export class SessionManager {
     // Persist the agent's title for `sessions`; a title received while opening arrives here at once
     adapter.onTitleChange(title => {
       this.store.update(id, { title: title ?? '' }).catch((err: Error) => this.host.log(`save title of ${id} failed: ${err.message}`))
+    })
+    // Persist the config for a reconnect, which would otherwise start from the agent's defaults
+    adapter.onConfigChange(configs => {
+      this.store.update(id, { config: configValues(configs) }).catch((err: Error) => this.host.log(`save config of ${id} failed: ${err.message}`))
     })
   }
 
@@ -259,7 +267,7 @@ export class SessionManager {
   /** Session state with the current value of each config option; the choices are left out. */
   status(id: string): SessionStatus {
     const open = this.get(id)
-    return { ...this.stateOf(open), config: Object.fromEntries(open.adapter.configs.map(o => [o.id, o.current_value])) }
+    return { ...this.stateOf(open), config: configValues(open.adapter.configs) }
   }
 
   output(id: string): OutputResult {

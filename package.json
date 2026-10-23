@@ -1,6 +1,6 @@
 {
   "name": "subagent-cockpit-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server that delegates tasks to external coding agents over the Agent Client Protocol",
   "author": "yejianfei.billy",
   "license": "Apache-2.0",

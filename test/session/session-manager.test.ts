@@ -4,15 +4,17 @@ import { spawnSync } from 'node:child_process'
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type * as acp from '@agentclientprotocol/sdk'
 import { createAdapter } from '../../src/adapter/adapter'
 import { loadConfig, resolveSubagent } from '../../src/config'
+import type { Store } from '../../src/host/host'
 import { NodeHost } from '../../src/host/node-host'
 import { SessionManager } from '../../src/session/session-manager'
 import type { SessionActivity } from '../../src/session/session-manager'
 import type { OpenParams } from '../../src/types'
 import { isAlive, recordActivity, setup, sleep, SlowWriteHost, spawnServer, until } from '../fixtures/harness'
 import type { Harness, HarnessOptions } from '../fixtures/harness'
-import type { Step } from '../fixtures/scripted-acp-agent'
+import type { Script, Step } from '../fixtures/scripted-acp-agent'
 
 async function withHarness(opts: HarnessOptions, fn: (h: Harness) => Promise<void>): Promise<void> {
   const h = await setup(opts)
@@ -32,6 +34,24 @@ const agentPids = async (h: Harness) => (await h.events('start')).map(e => Numbe
 function deadPid(): number {
   const { pid } = spawnSync(process.execPath, ['-e', ''])
   return pid ?? 999_999
+}
+
+/** NodeHost whose file writes fail while `failing` is set. */
+class FailingWriteHost extends NodeHost {
+  failing = false
+  readonly store: Store
+
+  constructor() {
+    super()
+    const base = new NodeHost().store
+    this.store = {
+      ...base,
+      writeText: async (path, data) => {
+        if (this.failing) throw new Error('disk full')
+        await base.writeText(path, data)
+      },
+    }
+  }
 }
 
 describe('config', () => {
@@ -816,8 +836,158 @@ describe('session titles', () => {
   }
 })
 
+describe('config on reconnect', () => {
+  /** set_config requests the agent process with the given start index received, as configId=value */
+  const setConfigsOf = async (h: Harness, startIndex: number) => {
+    const pid = (await agentPids(h))[startIndex]
+    return (await h.events('set_config')).filter(e => e.pid === pid).map(e => `${e.configId}=${e.value}`)
+  }
+
+  /** Rewrite a closed session's config in session.json; undefined removes it, like a record from before config was kept */
+  const writeConfig = async (h: Harness, id: string, config: Record<string, string> | undefined) => {
+    const path = join(sessionDir(h, id), 'session.json')
+    const rest = Object.fromEntries(Object.entries(JSON.parse(await readFile(path, 'utf-8'))).filter(([key]) => key !== 'config'))
+    await writeFile(path, JSON.stringify(config ? { ...rest, config } : rest))
+  }
+  const configured = { subagent: { model: 'gpt-b', reasoning_effort: 'high' } }
+  const select = (id: string, current: string, values: string[]): acp.SessionConfigOption =>
+    ({ type: 'select', id, name: id, currentValue: current, options: values.map(value => ({ value, name: value })) })
+
+  test('U228 reconnect restores the subagent config, model first, without a role prompt', () => withHarness(configured, async h => {
+    const { session } = await open(h)
+    await h.manager.close(session)
+    const reopened = await open(h, { session })
+    assert.deepEqual(h.manager.status(session).config, { mode: 'auto', model: 'gpt-b', reasoning_effort: 'high' })
+    assert.deepEqual(Object.fromEntries(reopened.config_options.map(o => [o.id, o.current_value])), { mode: 'auto', model: 'gpt-b', reasoning_effort: 'high' })
+    assert.deepEqual(await setConfigsOf(h, 1), ['model=gpt-b', 'reasoning_effort=high'])
+    const second = (await agentPids(h))[1]
+    assert.equal((await h.events('prompt')).filter(e => e.pid === second).length, 0)
+  }))
+
+  test('U229 a set_config change is kept in session.json and comes back on reconnect', () => withHarness(configured, async h => {
+    const { session } = await open(h)
+    await h.manager.setConfig(session, 'reasoning_effort', 'low')
+    await until(async () => (await savedRecord(h, session)).config?.reasoning_effort === 'low', 5000, 'config saved')
+    await h.manager.close(session)
+    await open(h, { session })
+    assert.equal(h.manager.status(session).config.reasoning_effort, 'low')
+    assert.deepEqual(await setConfigsOf(h, 1), ['model=gpt-b', 'reasoning_effort=low'])
+  }))
+
+  test('U230 a record without config falls back to the subagent config', () => withHarness(configured, async h => {
+    const { session } = await open(h)
+    await h.manager.close(session)
+    await writeConfig(h, session, undefined)
+    await open(h, { session })
+    assert.deepEqual(h.manager.status(session).config, { mode: 'auto', model: 'gpt-b', reasoning_effort: 'high' })
+  }))
+
+  test('U231 values equal to the agent\'s current ones send nothing', () => withHarness({ subagent: { model: 'gpt-a', reasoning_effort: 'medium' } }, async h => {
+    const { session } = await open(h)
+    await until(async () => (await savedRecord(h, session)).config?.model === 'gpt-a', 5000, 'config saved')
+    await h.manager.close(session)
+    await open(h, { session })
+    assert.deepEqual(await setConfigsOf(h, 1), [])
+  }))
+
+  test('U232 entries the agent no longer offers are skipped; the reconnect succeeds', () => withHarness(configured, async h => {
+    const logs: string[] = []
+    h.host.log = message => { logs.push(message) }
+    const { session } = await open(h)
+    await h.manager.close(session)
+    await writeConfig(h, session, { reasoning_effort: 'ultra', speed: 'fast', model: 'gpt-b' })
+    const reopened = await open(h, { session })
+    assert.equal(reopened.status, 'done')
+    assert.deepEqual(h.manager.status(session).config, { mode: 'auto', model: 'gpt-b', reasoning_effort: 'medium' })
+    assert.deepEqual(await setConfigsOf(h, 1), ['model=gpt-b'])
+    assert.ok(logs.some(l => /restore reasoning_effort=ultra skipped/.test(l)), logs.join('\n'))
+    assert.ok(logs.some(l => /restore speed=fast skipped/.test(l)), logs.join('\n'))
+  }))
+
+  test('U233 a failed restore request is logged; the reconnect succeeds', () => withHarness(configured, async h => {
+    const logs: string[] = []
+    h.host.log = message => { logs.push(message) }
+    const { session } = await open(h)
+    await h.manager.close(session)
+    await h.setScript('agent', { errors: { setConfig: true } })
+    const reopened = await open(h, { session })
+    assert.equal(reopened.status, 'done')
+    assert.equal(h.manager.status(session).state, 'IDLE')
+    assert.deepEqual(await setConfigsOf(h, 1), ['model=gpt-b', 'reasoning_effort=high'])
+    assert.ok(logs.some(l => /restore model=gpt-b skipped/.test(l)), logs.join('\n'))
+  }))
+
+  test('U234 model goes first whatever the order in session.json', () => withHarness({}, async h => {
+    const { session } = await open(h)
+    await h.manager.close(session)
+    await writeConfig(h, session, { reasoning_effort: 'high', model: 'gpt-b' })
+    await open(h, { session })
+    assert.deepEqual(await setConfigsOf(h, 1), ['model=gpt-b', 'reasoning_effort=high'])
+  }))
+
+  test('U235 a session closed for idleness gets its config back too', () => withHarness({ ...configured, idle: { timeout: 1 } }, async h => {
+    const { session } = await open(h)
+    await until(async () => (await h.manager.list())[0].state === 'CLOSED', 4000, 'idle close')
+    await open(h, { session })
+    assert.deepEqual(h.manager.status(session).config, { mode: 'auto', model: 'gpt-b', reasoning_effort: 'high' })
+  }))
+
+  test('U236 a config change the agent makes itself is kept and restored', () => withHarness({
+    scripts: { agent: { turns: [[{ update: { sessionUpdate: 'config_option_update', configOptions: [
+      select('mode', 'auto', ['auto', 'read-only', 'full-access']),
+      select('model', 'x', ['gpt-a', 'gpt-b', 'x']),
+      select('reasoning_effort', 'medium', ['medium', 'low', 'high']),
+    ] } }]] } },
+  }, async h => {
+    const { session } = await open(h)
+    await h.manager.prompt(session, 'switch', true)
+    await until(async () => (await savedRecord(h, session)).config?.model === 'x', 5000, 'config saved')
+    await h.manager.close(session)
+    await open(h, { session })
+    assert.equal(h.manager.status(session).config.model, 'x')
+  }))
+
+  test('U237 a failed config save leaves set_config working', () => withHarness({}, async h => {
+    const host = new FailingWriteHost()
+    const logs: string[] = []
+    host.log = message => { logs.push(message) }
+    const manager = new SessionManager(host, h.config, h.home)
+    try {
+      const { session } = await manager.open({ subagent: 'agent', cwd: h.dir })
+      host.failing = true
+      const configs = await manager.setConfig(session, 'model', 'gpt-b')
+      assert.equal(configs.find(o => o.id === 'model')?.current_value, 'gpt-b')
+      await until(() => logs.some(l => /save config of .* failed/.test(l)), 5000, 'save failure logged')
+    } finally {
+      host.failing = false
+      await manager.shutdown()
+    }
+  }))
+
+  // Each adapter restores under its own config ids: claude and opencode call the effort `effort`, agy is the bridge
+  for (const [adapter, script] of [
+    ['claude', { configOptions: [select('model', 'default', ['default', 'opus']), select('effort', 'medium', ['medium', 'high'])] }],
+    ['opencode', { configOptions: [select('model', 'default', ['default', 'opus']), select('effort', 'medium', ['medium', 'high'])] }],
+  ] satisfies Array<['claude' | 'opencode', Script]>) {
+    test(`U238 ${adapter} restores model and effort`, () => withHarness({ adapter, scripts: { agent: script }, subagent: { model: 'opus', reasoning_effort: 'high' } }, async h => {
+      const { session } = await open(h)
+      await h.manager.close(session)
+      await open(h, { session })
+      assert.deepEqual(h.manager.status(session).config, { model: 'opus', effort: 'high' })
+    }))
+  }
+
+  test('U238 antigravity restores model, then the effort that model offers', () => withHarness({ adapter: 'antigravity', subagent: { model: 'gemini-3.8-flash', reasoning_effort: 'high' } }, async h => {
+    const { session } = await open(h)
+    await h.manager.close(session)
+    await open(h, { session })
+    const { config } = h.manager.status(session)
+    assert.deepEqual([config.model, config.reasoning_effort], ['gemini-3.8-flash', 'high'])
+  }))
+})
+
 describe('activity', () => {
-  const closed = (seen: SessionActivity[]) => seen.flatMap(({ session, activity }) => (activity.kind === 'session_closed' ? [[session, activity.reason]] : []))
+  const closed =(seen: SessionActivity[]) => seen.flatMap(({ session, activity }) => (activity.kind === 'session_closed' ? [[session, activity.reason]] : []))
 
   test('U204 each way a session ends is reported once with its reason', async () => {
     await withHarness({ scripts: { agent: { delete: true } } }, async h => {

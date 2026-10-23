@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.1] - 2026-10-23
+
+### Changed
+
+- The Web UI's protocol log lists the newest message first.
+- The Web UI's turn dividers show the cache hit rate and, for agents that report a context window, the context as the turn left it. Grok turns show their tokens too, read from grok's own `_meta`.
+- Antigravity: the bridge passes agy's token usage on in the `session/prompt` result.
+
+### Fixed
+
+- Numbered and bulleted list markers in the Web UI's markdown were larger than the text.
+- Reconnecting to a session (after `close`, an idle close or a server restart) brought it back on the agent's own defaults, so `model`, `reasoning_effort`, `mode` and any `set_config` changes were lost without a word. Sessions now keep their config in `session.json` and get it back on reconnect, `model` first. Sessions saved by 0.1.0 get the subagent config.
+
 ## [0.1.0] - 2026-10-21
 
 ### Added

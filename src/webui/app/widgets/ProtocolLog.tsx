@@ -69,7 +69,8 @@ export default function ProtocolLog({ session }: { session: Conversation }) {
         <Table<MessageLogEntry>
           rowKey="seq"
           columns={columns}
-          dataSource={[...session.log]}
+          // Newest first, so the latest traffic is on the first page
+          dataSource={[...session.log].reverse()}
           pagination={{ defaultPageSize: 100, showSizeChanger: true }}
           scroll={{ y: Math.max(height - TABLE_CHROME, 120) }}
           expandable={{ expandedRowRender: entry => <Code lang="json">{JSON.stringify(entry.message, null, 2)}</Code> }}

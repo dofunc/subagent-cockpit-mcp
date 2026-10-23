@@ -53,6 +53,16 @@ describe('session.json', () => {
     assert.equal(saved.subagent, 'codex')
   }))
 
+  test('U239 config round-trips with its value types; a record without config still reads', () => withStore(async store => {
+    await store.create('codex_a', record())
+    assert.equal((await store.read('codex_a')).config, undefined)
+    await store.update('codex_a', { config: { model: 'gpt-b', fast: true } })
+    await store.update('codex_a', { last_prompt: 'hi' })
+    const saved = await store.read('codex_a')
+    assert.deepEqual(saved.config, { model: 'gpt-b', fast: true })
+    assert.equal(saved.last_prompt, 'hi')
+  }))
+
   test('U180 updates of one session run one after another; remove waits for them', async () => {
     const home = await mkdtemp(join(tmpdir(), 'cockpit-store-'))
     const host = new SlowWriteHost(100)

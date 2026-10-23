@@ -19,6 +19,9 @@ export const codex: TranscriptParser = {
   message: authStatus,
   promptResult(result) {
     const count = obj(obj(obj(result._meta).quota).token_count)
-    return result.usage === undefined && count.totalTokens !== undefined ? { ...result, usage: count } : result
+    if (result.usage !== undefined || count.totalTokens === undefined) return result
+    // token_count names the cache and reasoning fields its own way
+    const { cachedInputTokens = null, cacheWriteInputTokens = null, reasoningOutputTokens = null, ...rest } = count
+    return { ...result, usage: { ...rest, cachedReadTokens: cachedInputTokens, cachedWriteTokens: cacheWriteInputTokens, thoughtTokens: reasoningOutputTokens } }
   },
 }

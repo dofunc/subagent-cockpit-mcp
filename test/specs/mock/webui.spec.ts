@@ -98,8 +98,8 @@ test.describe('mock: webui page', () => {
     for (const [ending, count] of [[/^turn \d+ · done/, 3], [/^turn \d+ · cancelled/, 1], [/^turn \d+ · error · Internal error/, 1]] as const) {
       await expect(panel.getByRole('separator').filter({ hasText: ending })).toHaveCount(count)
     }
-    // Token counts from a thousand on read as K with one decimal
-    await expect(panel.getByRole('separator').filter({ hasText: /^turn \d+ · done · end_turn · \d+(\.\d)?K tokens$/ }).first()).toBeVisible()
+    // Token counts from a thousand on read as K with one decimal; the cache hit rate is of the whole prompt
+    await expect(panel.getByRole('separator').filter({ hasText: /^turn \d+ · done · end_turn · \d+(\.\d)?K tokens · cache 80%$/ }).first()).toBeVisible()
   })
 
   test('W4 tool calls: status icons, diffs, terminal, locations, input and output as key/value lists', async ({ page }) => {
@@ -239,6 +239,11 @@ test.describe('mock: webui page', () => {
     const held = (await snapshot(context.mock?.port ?? 0)).sessions.find(s => s.session === 'grok_grok-01k2x9v7m4')
     const arrows = log.getByRole('img', { name: /^arrow-(left|right)$/ })
     await expect(arrows).toHaveCount(held?.log.length ?? -1)
+    // Newest first: the first row has the highest number, the last the lowest
+    const numbers = held?.log.map(entry => entry.seq) ?? []
+    const rows = log.locator('tr.ant-table-row')
+    await expect(rows.first().locator('td').nth(1)).toHaveText(String(Math.max(...numbers)))
+    await expect(rows.last().locator('td').nth(1)).toHaveText(String(Math.min(...numbers)))
     const color = (name: string) => log.getByRole('img', { name }).first().evaluate(el => getComputedStyle(el).color)
     expect(await color('arrow-right')).not.toBe(await color('arrow-left'))
     await log.getByRole('button', { name: /expand row/i }).first().click()
@@ -295,7 +300,8 @@ test.describe('mock: webui page', () => {
     const git = coder.locator('.ant-collapse-item').filter({ hasText: 'git status --short' }).first()
     await expect(git).toContainText('M src/api/users.ts')
     await expect(git).toContainText('?? src/api/validate.ts')
-    await expect(coder.getByText(/18\.5K tokens/)).toBeVisible()
+    // codex's _meta.quota: 9984 of 8556 + 9984 prompt tokens read from the cache
+    await expect(coder.getByText(/18\.5K tokens · cache 54%$/)).toBeVisible()
 
     await pick(page, 'Fix auth middleware issues')
     const reviewer = tab(page, 'Conversation')
@@ -303,6 +309,11 @@ test.describe('mock: webui page', () => {
     await expect(toolTag('Read')).toHaveCount(1)
     await expect(toolTag('Edit')).not.toHaveCount(0)
     await expect(reviewer.getByText(/^Set mode = acceptEdits$/)).toBeVisible()
+    // List markers follow the compact text size, not the 16px the markdown theme fixes
+    const item = reviewer.locator('.x-markdown ol > li').first()
+    expect(await item.evaluate(li => [getComputedStyle(li, '::marker').fontSize, getComputedStyle(li).fontSize])).toEqual(['12px', '12px'])
+    // The context as the turn left it, from the latest usage_update
+    await expect(reviewer.getByRole('separator').filter({ hasText: /· cache 80% · context 61K \/ 200K$/ }).first()).toBeVisible()
 
     await pick(page, 'Set up the release workflow')
     const releaser = tab(page, 'Conversation')

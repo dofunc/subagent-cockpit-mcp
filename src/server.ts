@@ -143,7 +143,7 @@ const SPECS: ToolSpec[] = [
   },
   {
     name: 'open',
-    description: 'Open a session: reconnect when `session` is given, reuse this server\'s idle session with the same cwd and subagent when `reuse` is true, otherwise create one. Returns once the session is set up (role prompt included), with the session id and the full config_options. It takes no task: send tasks with `prompt`.',
+    description: 'Open a session: reconnect when `session` is given, reuse this server\'s idle session with the same cwd and subagent when `reuse` is true, otherwise create one. Reconnecting puts back the config the session last had (the subagent config, or later set_config changes). Returns once the session is set up (role prompt included), with the session id and the full config_options. It takes no task: send tasks with `prompt`.',
     params: {
       subagent: { type: 'string' },
       cwd: { type: 'string', description: 'Working directory of the agent' },

@@ -1,4 +1,5 @@
 import type { Host } from '../host/host'
+import type { ConfigValues } from '../types'
 
 export interface SessionRecord {
   subagent: string
@@ -9,6 +10,8 @@ export interface SessionRecord {
   last_at: string
   /** Title the agent gave the session; absent in records written before titles were kept */
   title?: string
+  /** Current value of each config option, as the session last had them; absent in records written before config was kept */
+  config?: ConfigValues
 }
 
 export interface StoredSession {

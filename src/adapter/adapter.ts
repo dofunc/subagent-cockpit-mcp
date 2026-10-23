@@ -94,6 +94,9 @@ export interface OpenOptions {
   role: string
   /** Native session id to reconnect to. Omit to create a new session. */
   resumeId?: string
+  /** Config to put back after a reconnect, as [config id, value]; only used with resumeId. Default: the subagent config. */
+  restore?: Array<[string, string | boolean]>
+
   signal?: AbortSignal
   /** Runs right after the native session exists, before setup continues. Throwing aborts the open. */
   onEstablished: (nativeId: string) => Promise<void>
@@ -224,6 +227,7 @@ export abstract class SubagentAdapter {
   private readonly feedback: { plan: PlanEntryInfo[]; usage: UsageInfo | null; title: string | null; commands: CommandInfo[] } =
     { plan: [], usage: null, title: null, commands: [] }
   private readonly titleListeners = new Set<(title: string | null) => void>()
+  private readonly configListeners = new Set<(configs: ConfigOptionInfo[]) => void>()
   // Set by the first session_info_update that carries title, null included. Until then the title is unknown, not cleared.
   private titleReceived = false
   private readonly notices = new Map<string, Notice>()
@@ -358,6 +362,14 @@ export abstract class SubagentAdapter {
     if (this.titleReceived) listener(this.feedback.title)
   }
 
+  /**
+   * Called with the new configs whenever the session's config changes after setup: the initial
+   * config of a new session, a restore on reconnect, set_config, or a config_option_update from the agent.
+   */
+  onConfigChange(listener: (configs: ConfigOptionInfo[]) => void): void {
+    this.configListeners.add(listener)
+  }
+
   /** Every ACP message on this connection, both ways, plus what only the adapter knows. */
   onActivity(listener: (activity: AdapterActivity) => void): void {
     this.activityListeners.add(listener)
@@ -368,8 +380,9 @@ export abstract class SubagentAdapter {
   /**
    * Start the agent and open a session (session/new, or session/load / session/resume for resumeId).
    * The setup phase is capped at 30s. New sessions then apply model / reasoning_effort and send the
-   * role prompt; open waits for those without a limit. Tasks are sent with prompt(), never here, so
-   * the caller holds the session id before any long-running work starts.
+   * role prompt; open waits for those without a limit. A reconnected session gets its config back
+   * (opts.restore, else the subagent config) and no role prompt. Tasks are sent with prompt(), never
+   * here, so the caller holds the session id before any long-running work starts.
    */
   async open(opts: OpenOptions): Promise<PromptResult> {
     await this.start(opts.config, opts.cwd)
@@ -383,6 +396,7 @@ export abstract class SubagentAdapter {
         throw this.toCockpitError(err)
       })
     if (!opts.resumeId) this.bootstrap(opts).catch((err: Error) => this.host.log(`session setup failed: ${err.message}`))
+    else await this.restoreConfig(opts.restore ?? this.initialConfig(opts.config))
     this.notify()
     return this.waitResult(opts, true)
   }
@@ -526,7 +540,7 @@ export abstract class SubagentAdapter {
     await wanted.reduce(async (prev, [configId, value]) => {
       await prev
       await this.connection().setSessionConfigOption({ sessionId: this.nativeIdValue, configId, value })
-        .then(r => { this.configOptions = r.configOptions })
+        .then(r => this.replaceConfigOptions(r.configOptions))
         .catch((err: Error) => this.host.log(`set ${configId}=${value} failed: ${err.message}`))
     }, Promise.resolve())
     this.bootstrapping = false
@@ -539,6 +553,30 @@ export abstract class SubagentAdapter {
       return
     }
     this.startTurn(this.buildInitPrompt(opts.role), true)
+  }
+
+  /**
+   * Put a reconnected session's config back. session/load and session/resume come back with the
+   * agent's own defaults, so what the session had, from the subagent config or a later set_config,
+   * would otherwise be lost without a word. model goes first: effort choices can depend on it. An
+   * entry the agent no longer offers, or a failed request, is logged and skipped; the open goes on.
+   */
+  private async restoreConfig(wanted: Array<[string, string | boolean]>): Promise<void> {
+    const ordered = [...wanted.filter(([id]) => id === 'model'), ...wanted.filter(([id]) => id !== 'model')]
+    await ordered.reduce(async (prev, [configId, value]) => {
+      await prev
+      const current = this.configOptions.find(o => o.id === configId)?.currentValue
+      if (value === '' || String(current) === String(value)) return
+      await this.setConfig(configId, String(value))
+        .catch((err: Error) => this.host.log(`restore ${configId}=${value} skipped: ${err.message}`))
+    }, Promise.resolve())
+  }
+
+  /** Take the agent's new config options and tell the config listeners. */
+  private replaceConfigOptions(options: acp.SessionConfigOption[]): void {
+    this.configOptions = options
+    const configs = this.configs
+    this.configListeners.forEach(l => l(configs))
   }
 
   /** Close the session: pending approvals get `cancelled` and questions `cancel`, then the agent process is terminated. */
@@ -723,7 +761,7 @@ export abstract class SubagentAdapter {
     const response = await this.connection().setSessionConfigOption(request).catch((err: Error) => {
       throw this.toCockpitError(err)
     })
-    this.configOptions = response.configOptions
+    this.replaceConfigOptions(response.configOptions)
     this.notify()
     return this.configs
   }
@@ -1078,7 +1116,7 @@ export abstract class SubagentAdapter {
         break
       }
       case 'config_option_update':
-        this.configOptions = update.configOptions
+        this.replaceConfigOptions(update.configOptions)
         this.pushEvent({ type: 'config' })
         break
       case 'plan':

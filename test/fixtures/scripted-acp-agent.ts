@@ -100,7 +100,7 @@ export interface Script {
   delete?: boolean
   authRequired?: boolean
   delays?: { initialize?: number; newSession?: number; loadSession?: number; role?: number; cancel?: number | 'never'; delete?: number }
-  errors?: { load?: boolean; delete?: boolean }
+  errors?: { load?: boolean; delete?: boolean; setConfig?: boolean }
   configOptions?: acp.SessionConfigOption[]
   replay?: string[]
   /** Steps run inside session/new and session/load, before the response */
@@ -339,6 +339,7 @@ const conn = new AgentSideConnection(client => {
     async setSessionConfigOption(params) {
       const value = 'value' in params ? params.value : null
       log({ event: 'set_config', configId: params.configId, value })
+      if (script().errors?.setConfig) throw new RequestError(-32603, 'set config failed')
       state.configOptions = state.configOptions.map(o => (o.id === params.configId && o.type === 'select' && typeof value === 'string' ? { ...o, currentValue: value } : o))
       return { configOptions: state.configOptions }
     },

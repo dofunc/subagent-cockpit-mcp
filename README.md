@@ -49,6 +49,12 @@ Open `http://127.0.0.1:7200` to watch the sessions: replies as they stream, tool
    claude mcp add subagent-cockpit -- npx -y subagent-cockpit-mcp
    ```
 
+   Claude Code asks before each MCP tool call. To let it drive the subagents without asking, allow the whole server in `~/.claude/settings.json` or the project's `.claude/settings.json`:
+
+   ```json
+   { "permissions": { "allow": ["mcp__subagent-cockpit"] } }
+   ```
+
    Codex CLI (`~/.codex/config.toml`):
 
    ```toml
@@ -137,7 +143,7 @@ A `subagents` object you write replaces the default entries as a whole. `idle.ti
 | `adapter` | `codex`, `claude`, `grok`, `opencode` or `antigravity` |
 | `description` | Shown by the `subagents` tool |
 | `role` | Role prompt sent to every new session |
-| `model`, `reasoning_effort`, `mode` | Initial settings for new sessions (Claude and OpenCode call the effort `effort`). `open` and `snapshot` list the values each agent accepts |
+| `model`, `reasoning_effort`, `mode` | Initial settings for new sessions (Claude and OpenCode call the effort `effort`). A session keeps its settings, `set_config` changes included, and gets them back when you reconnect. `open` and `snapshot` list the values each agent accepts |
 | `path` | The agent program. Empty means look it up in `PATH` |
 | `args`, `env` | Extra command-line args and environment. `${VAR}` reads the server's environment, `""` or `null` removes a variable |
 | `profile` | Settings shared by several subagents, see below |
@@ -191,7 +197,11 @@ The server passes settings through and never isolates them.
 - Questions. A question arrives as `question_needed` with the agent's own form in `requested_schema`. Field names differ per agent, so read them from the schema and reply with `answer({ session, question_id, content: { question_0: "Red" } })`. Approvals go first when both wait.
 - Approvals. An agent's own "don't ask again" option is usually saved for good, so `allow` never picks it. It allows the call once and keeps a rule in the server until the session closes. To have the agent remember it anyway, `approve` with that option: Codex `accept_execpolicy_amendment`, Claude Code `allow-with-updates`, Grok `always-allow`, OpenCode `always`.
 - Deleting. `delete` removes the server's session directory and the agent's own session. An open Claude Code session is closed first, which takes a few seconds. agy cannot delete a conversation, so it stays under `~/.gemini/antigravity-cli/`.
-- Antigravity. `agy -p` is headless and never asks. A tool that needs a permission is denied, and the output ends with a note naming it. Allow tools in agy's `permissions.allow`, or set `args: ["--dangerously-skip-permissions"]`.
+- Antigravity. `agy -p` is headless and never asks. A tool that needs a permission is denied, reading a file outside the session's `cwd` included, and the output ends with a note such as `agy denied in headless mode: ReadFile`. Either allow the action in `permissions.allow` of `~/.gemini/antigravity-cli/settings.json`, in agy's own form such as `read_file(<path>)`, or let that subagent skip agy's checks:
+
+  ```json
+  "docs": { "adapter": "antigravity", "args": ["--dangerously-skip-permissions"] }
+  ```
 - Client timeouts. Codex CLI times out tool calls after 60 seconds unless `tool_timeout_sec` is set. Claude Code aborts a call after 30 minutes without progress, and the server sends progress every 60 seconds, so long turns survive.
 
 ## Development

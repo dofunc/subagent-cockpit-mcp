@@ -3,7 +3,7 @@ import { Alert, Flex, Tag, theme, Typography } from 'antd'
 import { ApartmentOutlined, CloseCircleOutlined, ExclamationCircleOutlined, FileTextOutlined, InfoCircleOutlined, ScissorOutlined, SettingOutlined, ShrinkOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { Bubble, Think } from '@ant-design/x'
 import type { BubbleItemType, BubbleListProps } from '@ant-design/x'
-import type { ConversationItem, Conversation } from '../../../types'
+import type { ConversationItem, Conversation, JsonObject } from '../../../types'
 import { isObject } from '../../transcript'
 import type { Translate } from '../i18n'
 import { list, obj, text } from '../json'
@@ -42,14 +42,28 @@ function tokenCount(count: number): string {
   return `${(count / divisor).toFixed(unit ? 1 : 0).replace(/\.0$/, '')}${unit}`
 }
 
-/** Divider text for a finished turn: outcome, stop reason, tokens and error. */
+/**
+ * Percent of the prompt read from the cache, or undefined when the agent reports no cache reads. ACP keeps
+ * cache reads and writes out of inputTokens, so the prompt is all three together.
+ */
+function cacheRate(usage: JsonObject): number | undefined {
+  const [input, read, write] = [usage.inputTokens, usage.cachedReadTokens, usage.cachedWriteTokens].map(v => (typeof v === 'number' ? v : 0))
+  const prompt = input + read + write
+  return typeof usage.cachedReadTokens === 'number' && prompt > 0 ? Math.round((read / prompt) * 100) : undefined
+}
+
+/** Divider text for a finished turn: outcome, stop reason, tokens, cache hit rate, context at its end and error. */
 function turnSummary({ turn_id, data }: ConversationItem, t: Translate): string {
   const usage = obj(data.usage)
+  const context = obj(data.context)
+  const rate = cacheRate(usage)
   return [
     t('turn', { id: turn_id ?? '?' }),
     text(data.outcome),
     text(data.stopReason),
     usage.totalTokens === undefined ? '' : t('tokens', { count: tokenCount(Number(usage.totalTokens)) }),
+    rate === undefined ? '' : t('cacheHit', { rate: String(rate) }),
+    context.size === undefined ? '' : t('turnContext', { used: tokenCount(Number(context.used)), size: tokenCount(Number(context.size)) }),
     text(data.error),
   ].filter(Boolean).join(' · ')
 }

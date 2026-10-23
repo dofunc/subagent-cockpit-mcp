@@ -91,9 +91,12 @@ export function applyActivity(view: Conversation, at: number, activity: Conversa
     case 'turn_finished': {
       const result = findItem(view, `prompt:${activity.turn_id}`)?.data.result
       const { stopReason = null, usage = null } = isObject(result) ? result : {}
+      // The context as the turn left it: the latest usage_update, when the agent sends one with a window size
+      const { used = null, size = null } = isObject(view.info.usage) ? view.info.usage : {}
+      const context = typeof size === 'number' && size > 0 ? { used, size } : null
       pushItem(view, {
         id: `turn:${activity.turn_id}`, kind: 'turn', at, turn_id: activity.turn_id,
-        data: { outcome: activity.outcome, error: activity.error, stopReason, usage }, log: [],
+        data: { outcome: activity.outcome, error: activity.error, stopReason, usage, context }, log: [],
       })
       break
     }

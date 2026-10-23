@@ -233,7 +233,7 @@ describe('transcript: approvals, questions and turns', () => {
     assert.deepEqual(field(question.data.result, 'content'), { choice: 'a' })
 
     const turn = item(view, 'turn:1')
-    assert.deepEqual(turn.data, { outcome: 'done', error: null, stopReason: 'end_turn', usage: { totalTokens: 10 } })
+    assert.deepEqual(turn.data, { outcome: 'done', error: null, stopReason: 'end_turn', usage: { totalTokens: 10 }, context: null })
     assert.equal(view.title, 'Fix login')
     assert.equal(view.state, 'IDLE')
     assert.equal(view.closed, 'idle')
@@ -471,5 +471,39 @@ describe('transcript: platform parsers', () => {
     assert.deepEqual(errors.map(e => [e.data.method, field(e.data.error, 'message')]), [['session/set_config_option', 'Unknown model: grok-9']])
     assert.deepEqual(view.info.configOptions, configOptions)
     assert.deepEqual(ofKind(view, 'raw'), [])
+  })
+
+  test('U240 a turn keeps the context at its end; none without a usage_update that has a size', () => {
+    const view = feedAs(
+      'claude',
+      started(1),
+      prompt(1),
+      update({ sessionUpdate: 'usage_update', used: 0, size: 1000000 }),
+      update({ sessionUpdate: 'usage_update', used: 41596, size: 1000000, cost: { amount: 0.21, currency: 'USD' } }),
+      acp('in', { id: 1, result: { stopReason: 'end_turn' } }),
+      finished(1),
+      started(2),
+      prompt(2),
+      update({ sessionUpdate: 'usage_update', used: 41631, size: 1000000 }),
+      acp('in', { id: 2, result: { stopReason: 'end_turn' } }),
+      finished(2),
+    )
+    assert.deepEqual(item(view, 'turn:1').data.context, { used: 41596, size: 1000000 })
+    assert.deepEqual(item(view, 'turn:2').data.context, { used: 41631, size: 1000000 })
+    const none = feed(started(1), prompt(1), update({ sessionUpdate: 'usage_update', used: 5, size: 0 }), acp('in', { id: 1, result: { stopReason: 'end_turn' } }), finished(1))
+    assert.equal(item(none, 'turn:1').data.context, null)
+  })
+
+  test('U241 grok and codex usage outside the standard field becomes the standard usage, cache reads kept apart', () => {
+    // As grok 1.0.46 reports a turn: its inputTokens count the cache reads, the top-level total counts reasoning too
+    const grokMeta = {
+      totalTokens: 23467, inputTokens: 23108, outputTokens: 1, cachedReadTokens: 22912, reasoningTokens: 358,
+      usage: { inputTokens: 23108, outputTokens: 1, totalTokens: 23109, cachedReadTokens: 22912, cacheCreationTokens: 0, reasoningTokens: 358 },
+    }
+    const grok = feed(started(1), prompt(1), acp('in', { id: 1, result: { stopReason: 'end_turn', _meta: grokMeta } }), finished(1))
+    assert.deepEqual(item(grok, 'turn:1').data.usage, { totalTokens: 23467, inputTokens: 196, outputTokens: 1, cachedReadTokens: 22912, cachedWriteTokens: 0, thoughtTokens: 358 })
+    const quota = { token_count: { totalTokens: 18630, inputTokens: 449, cachedInputTokens: 18176, cacheWriteInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 0 } }
+    const codex = feedAs('codex', started(1), prompt(1), acp('in', { id: 1, result: { stopReason: 'end_turn', _meta: { quota } } }), finished(1))
+    assert.deepEqual(item(codex, 'turn:1').data.usage, { totalTokens: 18630, inputTokens: 449, outputTokens: 5, cachedReadTokens: 18176, cachedWriteTokens: 0, thoughtTokens: 0 })
   })
 })

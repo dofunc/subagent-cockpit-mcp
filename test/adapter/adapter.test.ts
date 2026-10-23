@@ -827,6 +827,8 @@ describe('opencode adapter', () => {
 describe('antigravity adapter', () => {
   const STREAM_JSON = ['--input-format', 'stream-json', '--output-format', 'stream-json']
   const agyText = (index: number, text: string) => ({ step_index: index, state: 'ACTIVE', step_type: 'agent_response', text_delta: text })
+  /** A session/prompt response among the mirrored messages; the SDK types every result as unknown */
+  const isPromptResponse = (result: unknown): result is acp.PromptResponse => typeof result === 'object' && result !== null && 'stopReason' in result
   const agyTool = (index: number, name: string, state: string, info: Record<string, unknown>) => ({ step_index: index, state, step_type: 'tool', tool_name: name, tool_info: info })
   // Each `agy -p` process logs one argv entry; ppid is the bridge
   const agyRuns = (h: Harness) => h.events('argv')
@@ -895,6 +897,24 @@ describe('antigravity adapter', () => {
     assert.deepEqual([r.status, r.outcome], ['done', 'done'])
     assert.match(r.output ?? '', /agy denied in headless mode: RunCommand/)
     assert.match(r.output ?? '', /permissions\.allow/)
+  }))
+
+  test('U242 agy\'s usage reaches the prompt result in ACP terms: cache reads apart from the input', () => withHarness({
+    adapter: 'antigravity',
+    agy: { turns: [{ match: '^go$', result: { usage: { input_tokens: 8946, output_tokens: 11, thinking_tokens: 2, cache_read_tokens: 4750, total_tokens: 8957 } } }] },
+  }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    await h.manager.prompt(session, 'go', true)
+    await h.manager.prompt(session, 'plain', true)
+    const results = ofKind(seen, 'acp')
+      .flatMap(({ direction, message }) => (direction === 'in' && 'result' in message && isPromptResponse(message.result) ? [message.result] : []))
+    // The role turn and 'plain' have no usage from the fake agy
+    assert.deepEqual(results.map(r => r.usage ?? null), [
+      null,
+      { totalTokens: 8957, inputTokens: 4196, outputTokens: 11, thoughtTokens: 2, cachedReadTokens: 4750 },
+      null,
+    ])
   }))
 
   test('U188 cancel: the interrupted agy is never reused, the next turn continues the conversation', () => withHarness({

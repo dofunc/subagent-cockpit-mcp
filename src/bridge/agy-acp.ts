@@ -28,6 +28,15 @@ interface AgyResult {
   response: string
   error?: string
   denied_actions?: Array<{ action: string; display_name: string }>
+  usage?: AgyUsage
+}
+/** agy's token counts for a turn; input_tokens include the cache reads */
+interface AgyUsage {
+  input_tokens?: number
+  output_tokens?: number
+  thinking_tokens?: number
+  cache_read_tokens?: number
+  total_tokens?: number
 }
 type AgyEvent =
   | { event: 'init'; conversation_id: string; init: { model?: string } }
@@ -122,6 +131,17 @@ async function listModels(cwd: string): Promise<Map<string, string[]>> {
     const base = id.replace(EFFORTS, '')
     return models.set(base, [...(models.get(base) ?? []), ...(effort ? [effort] : [])])
   }, new Map<string, string[]>())
+}
+
+/** A turn's usage in ACP terms, where the input leaves out the cache reads that agy counts in it. */
+function toUsage({ input_tokens = 0, output_tokens = 0, thinking_tokens, cache_read_tokens = 0, total_tokens }: AgyUsage): NonNullable<acp.PromptResponse['usage']> {
+  return {
+    totalTokens: total_tokens ?? input_tokens + output_tokens,
+    inputTokens: input_tokens - cache_read_tokens,
+    outputTokens: output_tokens,
+    thoughtTokens: thinking_tokens,
+    cachedReadTokens: cache_read_tokens,
+  }
 }
 
 /** One running `agy -p` process. */
@@ -305,7 +325,7 @@ class AgyAgent implements acp.Agent {
         update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: note }, messageId: 'agy-denied' },
       })
     }
-    return { stopReason: 'end_turn' }
+    return { stopReason: 'end_turn', ...(result.usage ? { usage: toUsage(result.usage) } : {}) }
   }
 
   async cancel(_params: acp.CancelNotification): Promise<void> {
