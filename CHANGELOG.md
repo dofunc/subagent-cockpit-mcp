@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1] - 2026-10-24
+
+### Added
+
+- Pi (Earendil's pi coding agent, 1.4.0+) as a sixth agent: `"adapter": "pi"`. A bundled bridge, `dist/pi-acp.js`, drives the local `pi --mode rpc` per session. Models are `provider/id`, `reasoning_effort` takes pi's thinking levels, `cancel` aborts the turn, reconnecting replays the history, and `delete` removes the session file. pi never asks for approval, so its tools run straight away; limit them with `--tools` in `args`.
+- `snapshot` takes `simplify: true` for clients that poll it: tool calls keep only what their collapsed card shows (title, kind, status, paths), and sessions leave out their slash commands. A poll stays small when tool output is large.
+- `item` returns one conversation item in full by its id, so a client can fetch a tool call's input, output and diffs when they are opened. An item no longer kept fails with `ITEM_NOT_FOUND`.
+
 ## [0.2.0] - 2026-10-23
 
 ### Changed

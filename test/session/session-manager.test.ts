@@ -109,8 +109,8 @@ describe('config', () => {
       assert.deepEqual(saved.webui, { port: 7200 })
       assert.deepEqual(config.webui, { port: 7200, truncate_message_size: 1048576, max_message_count: 5000 })
       assert.deepEqual(saved.profiles, {})
-      assert.deepEqual(Object.keys(saved.subagents), ['codex', 'claude', 'grok', 'opencode', 'antigravity'])
-      assert.deepEqual(Object.keys(saved.subagents).map(name => saved.subagents[name].adapter), ['codex', 'claude', 'grok', 'opencode', 'antigravity'])
+      assert.deepEqual(Object.keys(saved.subagents), ['codex', 'claude', 'grok', 'opencode', 'antigravity', 'pi'])
+      assert.deepEqual(Object.keys(saved.subagents).map(name => saved.subagents[name].adapter), ['codex', 'claude', 'grok', 'opencode', 'antigravity', 'pi'])
       Object.values(saved.subagents).forEach(sub => {
         assert.deepEqual([sub.path, sub.args, sub.profile], ['', [], ''])
         assert.equal('codex_path' in sub, false)
@@ -680,6 +680,29 @@ describe('delete', () => {
     const runs = await h.events('argv')
     const pids = runs.flatMap(e => [Number(e.pid), Number(e.ppid)])
     await until(() => pids.every(p => !isAlive(p)), 5000, 'bridges and fake agy exit')
+  }))
+
+  test('U304 pi: open and closed sessions are deleted with their pi session files', () => withHarness({ adapter: 'pi' }, async h => {
+    const live = (await open(h)).session
+    const closed = (await open(h)).session
+    await h.manager.prompt(live, 'go', true)
+    await h.manager.close(closed)
+    const fileOf = (session: string) => join(h.piSessions, `${session.replace(/^pi_/, '')}.jsonl`)
+    assert.equal(await exists(fileOf(closed)), true)
+    assert.deepEqual(await h.manager.delete(live), { session: live, native: 'deleted' })
+    assert.deepEqual(await h.manager.delete(closed), { session: closed, native: 'deleted' })
+    assert.equal(await exists(fileOf(live)), false)
+    assert.equal(await exists(fileOf(closed)), false)
+    assert.equal(await exists(sessionDir(h, live)), false)
+    assert.equal(await exists(sessionDir(h, closed)), false)
+    // The closed one goes through a fresh bridge: pi started on the id, asked for its state, never for its history
+    const runs = await h.events('argv')
+    const temporary = runs.at(-1)
+    assert.ok(temporary?.argv.includes(closed.replace(/^pi_/, '')))
+    const commands = (await h.events('command')).filter(e => e.pid === temporary?.pid).map(e => e.type)
+    assert.deepEqual([...new Set(commands)], ['get_state'])
+    const pids = runs.flatMap(e => [Number(e.pid), Number(e.ppid)])
+    await until(() => pids.every(p => !isAlive(p)), 5000, 'bridges and fake pi exit')
   }))
 
   test('U84 closed session with delete support: native delete through a temporary agent', () => withHarness(deletable, async h => {

@@ -31,6 +31,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     grok: { ...SUBAGENT_DEFAULTS, adapter: 'grok', description: 'Grok Build' },
     opencode: { ...SUBAGENT_DEFAULTS, adapter: 'opencode', description: 'OpenCode' },
     antigravity: { ...SUBAGENT_DEFAULTS, adapter: 'antigravity', description: 'Google Antigravity' },
+    pi: { ...SUBAGENT_DEFAULTS, adapter: 'pi', description: 'Pi' },
   },
 }
 

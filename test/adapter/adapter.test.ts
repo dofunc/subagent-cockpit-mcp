@@ -1,13 +1,14 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import type * as acp from '@agentclientprotocol/sdk'
 import { loadConfig } from '../../src/config'
 import { SessionManager } from '../../src/session/session-manager'
 import type { SessionActivity } from '../../src/session/session-manager'
 import type { ConfigOptionInfo, JsonValue, OpenParams, SnapshotItem } from '../../src/types'
-import { FAKE_VERSIONS, fakeProgram, isAlive, ofKind, recordActivity, setup, sleep, spawnServer, until } from '../fixtures/harness'
+import { FAKE_VERSIONS, fakeProgram, isAlive, ofKind, PI_BRIDGE_SOURCE, recordActivity, setup, sleep, spawnServer, TSX, until } from '../fixtures/harness'
 import type { Harness, HarnessOptions } from '../fixtures/harness'
 import type { Step } from '../fixtures/scripted-acp-agent'
 
@@ -1094,6 +1095,330 @@ describe('antigravity adapter', () => {
     }
   }))
 })
+
+describe('pi adapter', () => {
+  const text = (delta: string) => ({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta } })
+  const thinking = (delta: string) => ({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta } })
+  const toolStart = (id: string, toolName: string, args: Record<string, unknown>) => ({ type: 'tool_execution_start', toolCallId: id, toolName, args })
+  const toolUpdate = (id: string, toolName: string, output: string) => ({ type: 'tool_execution_update', toolCallId: id, toolName, args: {}, partialResult: { content: [{ type: 'text', text: output }] } })
+  const toolEnd = (id: string, toolName: string, result: Record<string, unknown>, isError = false) => ({ type: 'tool_execution_end', toolCallId: id, toolName, result, isError })
+  const usage = (input: number, output: number, cacheRead: number, reasoning: number) => ({
+    type: 'turn_end',
+    message: { role: 'assistant', content: [], stopReason: 'toolUse', usage: { input, output, cacheRead, cacheWrite: 0, reasoning, totalTokens: input + output + cacheRead } },
+    toolResults: [],
+  })
+  /** A session/prompt response among the mirrored messages; the SDK types every result as unknown */
+  const isPromptResponse = (result: unknown): result is acp.PromptResponse => typeof result === 'object' && result !== null && 'stopReason' in result
+  // Each pi process logs one argv entry; ppid is the bridge
+  const piRuns = (h: Harness) => h.events('argv')
+  const allGone = async (h: Harness, label: string) => {
+    const pids = (await piRuns(h)).flatMap(e => [Number(e.pid), Number(e.ppid)])
+    await until(() => pids.every(p => !isAlive(p)), 5000, label)
+  }
+  /** Command types one pi process received, in order */
+  const commandsOf = async (h: Harness, pid: unknown) => (await h.events('command')).filter(e => e.pid === pid).map(e => String(e.type))
+  const toolCalls = (h: Harness, session: string) => new Map(items(h, session).filter(i => i.kind === 'tool').map(i => [String(i.data.toolCallId), i.data]))
+  const nativeId = (session: string) => session.replace(/^pi_/, '')
+  const startTurn = async (h: Harness, session: string, prompt: string) => {
+    const pending = h.manager.prompt(session, prompt, true)
+    await until(async () => (await h.events('command')).some(e => e.type === 'prompt' && JSON.stringify(e.command).includes(prompt)), 5000, `${prompt} reaches pi`)
+    return { pending }
+  }
+
+  test('U295 pi runs in rpc mode with args; model and thinking level go over RPC; mode is ignored', () => withHarness({
+    adapter: 'pi',
+    subagent: { args: ['--no-skills'], model: 'sub2api/model-b', reasoning_effort: 'low', mode: 'plan' },
+  }, async h => {
+    const logs: string[] = []
+    h.host.log = (message: string) => { logs.push(message) }
+    const { session } = await open(h)
+    const [run] = await piRuns(h)
+    assert.equal(session, `pi_${(await readdir(h.piSessions))[0].replace(/\.jsonl$/, '')}`)
+    assert.deepEqual(run.argv, ['--mode', 'rpc', '--no-skills'])
+    assert.deepEqual(run.env, { PI_PATH: h.config.subagents.agent.path })
+    const sent = (await h.events('command')).map(e => JSON.parse(JSON.stringify(e.command)))
+    const setModel = sent.find(c => c.type === 'set_model')
+    assert.deepEqual([setModel?.provider, setModel?.modelId], ['sub2api', 'model-b'])
+    assert.deepEqual(sent.find(c => c.type === 'set_thinking_level')?.level, 'low')
+    assert.ok(logs.some(l => l.includes('pi adapter ignores mode')))
+  }))
+
+  test('U296 thinking, text and tools become thought, message and tool calls with diffs', () => withHarness({
+    adapter: 'pi',
+    pi: {
+      turns: [{
+        match: '^go$',
+        events: [
+          thinking('plan'), text('Hel'), text('lo'),
+          toolStart('b1', 'bash', { command: 'ls', timeout: 10 }),
+          toolUpdate('b1', 'bash', 'a\n'), toolUpdate('b1', 'bash', 'a\nb\n'),
+          toolEnd('b1', 'bash', { content: [{ type: 'text', text: 'a\nb\n' }], structuredContent: { output: 'a\nb\n', exit_code: 0 } }),
+          toolStart('e1', 'edit', { path: 'notes.txt', edits: [{ oldText: 'beta', newText: 'BETA' }, { oldText: 'gamma', newText: 'GAMMA' }] }),
+          toolEnd('e1', 'edit', { content: [{ type: 'text', text: 'Successfully replaced 2 block(s) in notes.txt.' }], details: { diff: '-beta\n+BETA' } }),
+          toolStart('w1', 'write', { path: 'hello.txt', content: 'hi\n' }),
+          toolEnd('w1', 'write', { content: [{ type: 'text', text: 'Successfully wrote to hello.txt' }] }),
+          toolStart('r1', 'read', { path: '/nope' }),
+          toolEnd('r1', 'read', { content: [{ type: 'text', text: 'ENOENT' }] }, true),
+          text(' world'),
+        ],
+      }],
+    },
+  }, async h => {
+    const { session } = await open(h)
+    const r = await h.manager.prompt(session, 'go', true)
+    assert.deepEqual([r.status, r.outcome], ['done', 'done'])
+    assert.match(r.output ?? '', /Hello/)
+    assert.match(r.output ?? '', /world/)
+    assert.ok(items(h, session).some(i => i.kind === 'thought'))
+    const calls = toolCalls(h, session)
+    const bash = calls.get('b1')
+    assert.deepEqual([bash?.kind, bash?.status, bash?.rawInput], ['execute', 'completed', { command: 'ls', timeout: 10 }])
+    // The cumulative output replaces the earlier one instead of piling up
+    assert.deepEqual(bash?.content, [{ type: 'content', content: { type: 'text', text: 'a\nb\n' } }])
+    const edit = calls.get('e1')
+    assert.equal(edit?.kind, 'edit')
+    assert.deepEqual(edit?.content, [
+      { type: 'diff', path: 'notes.txt', oldText: 'beta', newText: 'BETA' },
+      { type: 'diff', path: 'notes.txt', oldText: 'gamma', newText: 'GAMMA' },
+    ])
+    assert.deepEqual(edit?.locations, [{ path: 'notes.txt' }])
+    assert.deepEqual(calls.get('w1')?.content, [{ type: 'diff', path: 'hello.txt', oldText: null, newText: 'hi\n' }])
+    assert.deepEqual([calls.get('r1')?.kind, calls.get('r1')?.status], ['read', 'failed'])
+  }))
+
+  test('U297 stop reasons: length is max_tokens, error is AGENT_ERROR, a crash restarts pi on the session', () => withHarness({
+    adapter: 'pi',
+    pi: { turns: [{ match: '^long$', stop_reason: 'length' }, { match: '^limit$', stop_reason: 'error', error_message: 'rate limited' }, { match: '^crash$', crash: true }] },
+  }, async h => {
+    const seen = recordActivity(h.manager)
+    const { session } = await open(h)
+    assert.equal((await h.manager.prompt(session, 'long', true)).outcome, 'done')
+    const stops = ofKind(seen, 'acp').flatMap(({ direction, message }) => (direction === 'in' && 'result' in message && isPromptResponse(message.result) ? [message.result.stopReason] : []))
+    assert.equal(stops.at(-1), 'max_tokens')
+    await assert.rejects(h.manager.prompt(session, 'limit', true), rejectsWith('AGENT_ERROR', /rate limited/))
+    assert.equal(h.manager.status(session).state, 'IDLE')
+    await assert.rejects(h.manager.prompt(session, 'crash', true), rejectsWith('AGENT_ERROR', /pi exited with code 3/))
+    assert.equal((await h.manager.prompt(session, 'again', true)).status, 'done')
+    const runs = await piRuns(h)
+    assert.equal(runs.length, 2)
+    assert.deepEqual(runs[1].argv, ['--mode', 'rpc', '--session', nativeId(session)])
+  }))
+
+  for (const variant of ['ok', 'stats_error', 'omit', 'null_tokens'] as const) {
+    test(`U298 usage sums the turn_end usage; context usage only when pi reports numbers (${variant})`, () => withHarness({
+      adapter: 'pi',
+      pi: {
+        ...(variant === 'stats_error' ? { stats_error: true } : {}),
+        ...(variant === 'omit' || variant === 'null_tokens' ? { context_usage: variant } : {}),
+        turns: [{ match: '^go$', events: [usage(10, 2, 5, 1), text('done'), usage(3, 4, 0, 0)] }],
+      },
+    }, async h => {
+      const seen = recordActivity(h.manager)
+      const { session } = await open(h)
+      const r = await h.manager.prompt(session, 'go', true)
+      assert.equal(r.outcome, 'done')
+      const results = ofKind(seen, 'acp').flatMap(({ direction, message }) => (direction === 'in' && 'result' in message && isPromptResponse(message.result) ? [message.result] : []))
+      assert.deepEqual(results.at(-1)?.usage, { inputTokens: 13, outputTokens: 6, cachedReadTokens: 5, cachedWriteTokens: 0, thoughtTokens: 1, totalTokens: 24 })
+      const progress = h.manager.progress(session)
+      assert.deepEqual(progress.usage, variant === 'ok' ? { used: 1200, size: 272000, cost: null } : null)
+    }))
+  }
+
+  test('U299 cancel aborts the turn; the same pi takes the next one', () => withHarness({
+    adapter: 'pi',
+    pi: { turns: [{ match: '^go$', hang: true }] },
+  }, async h => {
+    const { session } = await open(h)
+    const { pending } = await startTurn(h, session, 'go')
+    h.manager.cancel(session)
+    assert.equal((await pending).outcome, 'cancelled')
+    assert.equal(h.manager.status(session).state, 'IDLE')
+    assert.equal((await h.manager.prompt(session, 'again', true)).status, 'done')
+    const runs = await piRuns(h)
+    assert.equal(runs.length, 1)
+    assert.ok((await commandsOf(h, runs[0].pid)).includes('abort'))
+  }))
+
+  test('U299 cancel while pi restarts after a crash sends nothing and keeps the new pi', () => withHarness({
+    adapter: 'pi',
+    pi: { resume_delay_ms: 2000, turns: [{ match: '^crash$', crash: true }] },
+  }, async h => {
+    const { session } = await open(h)
+    await assert.rejects(h.manager.prompt(session, 'crash', true))
+    const again = h.manager.prompt(session, 'again', true)
+    await until(async () => (await piRuns(h)).length === 2, 5000, 'pi restarting')
+    h.manager.cancel(session)
+    const r = await again
+    assert.deepEqual([r.status, r.outcome], ['done', 'cancelled'])
+    assert.equal((await h.manager.prompt(session, 'third', true)).status, 'done')
+    const runs = await piRuns(h)
+    assert.equal(runs.length, 2)
+    const prompts = (await h.events('command')).filter(e => e.pid === runs[1].pid && e.type === 'prompt').map(e => JSON.parse(JSON.stringify(e.command)).message)
+    assert.deepEqual(prompts, ['third'])
+  }))
+
+  test('U300 config options come from pi; model ids may hold a slash; unknown values are refused', () => withHarness({
+    adapter: 'pi',
+    pi: { models: ['sub2api/model-a', 'sub2api/model-b', 'other/x/y'], levels: ['off', 'low', 'high'] },
+  }, async h => {
+    const opened = await open(h)
+    const option = (options: typeof opened.config_options, id: string) => options.find(o => o.id === id)
+    assert.deepEqual(option(opened.config_options, 'model')?.options.map(o => o.value), ['sub2api/model-a', 'sub2api/model-b', 'other/x/y'])
+    assert.deepEqual(option(opened.config_options, 'reasoning_effort')?.options.map(o => o.value), ['off', 'low', 'high'])
+    const before = (await h.events('command')).length
+    await h.manager.setConfig(opened.session, 'model', 'other/x/y')
+    const after = (await h.events('command')).slice(before).map(e => JSON.parse(JSON.stringify(e.command)))
+    const setModel = after.find(c => c.type === 'set_model')
+    assert.deepEqual([setModel?.provider, setModel?.modelId], ['other', 'x/y'])
+    assert.ok(after.some(c => c.type === 'get_available_thinking_levels'))
+    await h.manager.setConfig(opened.session, 'reasoning_effort', 'high')
+    assert.equal(h.manager.status(opened.session).config.reasoning_effort, 'high')
+    const count = (await h.events('command')).filter(e => e.type === 'set_model').length
+    await assert.rejects(h.manager.setConfig(opened.session, 'model', 'nope/z'), { code: 'INVALID_OPTION' })
+    assert.equal((await h.events('command')).filter(e => e.type === 'set_model').length, count)
+  }))
+
+  test('U301 close then reconnect replays the history and brings the commands back', () => withHarness({
+    adapter: 'pi',
+    pi: { commands: [{ name: 'review', description: 'Review' }, { name: 'skill:x', description: 'X' }], turns: [{ match: '^remember tulip$', events: [text('ok tulip')] }] },
+  }, async h => {
+    const { session } = await open(h)
+    await h.manager.prompt(session, 'remember tulip', true)
+    await h.manager.close(session)
+    await open(h, { session })
+    const runs = await piRuns(h)
+    assert.deepEqual(runs.at(-1)?.argv, ['--mode', 'rpc', '--session', nativeId(session)])
+    await until(() => items(h, session).some(i => i.kind === 'user_message' && JSON.stringify(i.data).includes('remember tulip')), 5000, 'replayed prompt')
+    assert.ok(items(h, session).filter(i => i.kind === 'message').some(i => textOf(i) === 'ok tulip'))
+    await until(() => h.manager.progress(session).commands.length === 2, 5000, 'commands after reconnect')
+    assert.equal((await h.manager.prompt(session, 'again', true)).status, 'done')
+  }))
+
+  test('U302 a session pi does not know is not found and leaves nothing running', () => withHarness({ adapter: 'pi' }, async h => {
+    const { session } = await open(h)
+    await h.manager.close(session)
+    await rm(join(h.piSessions, `${nativeId(session)}.jsonl`))
+    await assert.rejects(open(h, { session }), rejectsWith('AGENT_ERROR', /not found/))
+    assert.equal(await readFile(join(h.home, 'sessions', session, 'lock.pid')).then(() => true, () => false), false)
+    await allGone(h, 'bridge and fake pi exit')
+  }))
+
+  test('U303 no API key is AUTH_REQUIRED on the role turn; the session stays until closed', () => withHarness({ adapter: 'pi', pi: { no_key: true } }, async h => {
+    await assert.rejects(open(h), rejectsWith('AUTH_REQUIRED', /\/login/))
+    const listed = await h.manager.list(h.dir)
+    assert.equal(listed.length, 1)
+    assert.equal(h.manager.status(listed[0].session).state, 'IDLE')
+    await h.manager.close()
+    await allGone(h, 'bridge and fake pi exit')
+  }))
+
+  test('U305 close ends an idle pi', () => withHarness({ adapter: 'pi' }, async h => {
+    const { session } = await open(h)
+    await h.manager.close(session)
+    await allGone(h, 'bridge and fake pi exit')
+    const [run] = await piRuns(h)
+    assert.ok((await h.log()).some(e => e.pid === run.pid && e.event === 'exit'))
+  }))
+
+  for (const how of ['close', 'SIGTERM'] as const) {
+    test(`U305 ${how} during a turn ends pi`, () => withHarness({ adapter: 'pi', pi: { turns: [{ match: '^go$', hang: true }] } }, async h => {
+      const { session } = await open(h)
+      await h.manager.prompt(session, 'go', false)
+      await until(async () => (await h.events('command')).some(e => e.type === 'prompt' && JSON.stringify(e.command).includes('"go"')), 5000, 'go reaches pi')
+      const [run] = await piRuns(h)
+      how === 'close' ? await h.manager.close(session) : process.kill(Number(run.ppid), 'SIGTERM')
+      await allGone(h, 'bridge and fake pi exit')
+      assert.ok((await h.log()).some(e => e.pid === run.pid && e.event === 'exit'))
+      assert.equal((await piRuns(h)).length, 1)
+    }))
+  }
+
+  test('U306 an extension dialog is answered as cancelled; the turn finishes', () => withHarness({ adapter: 'pi', pi: { dialog: true } }, async h => {
+    const { session } = await open(h)
+    const r = await h.manager.prompt(session, 'go', true)
+    assert.deepEqual([r.status, r.outcome], ['done', 'done'])
+    assert.deepEqual((await h.events('ui_response')).map(e => [e.id, e.cancelled]), [['ui-1', true]])
+  }))
+
+  test('U307 a non-JSON line from pi is logged and dropped; ACP keeps working', () => withHarness({
+    adapter: 'pi',
+    pi: { turns: [{ match: '^go$', raw: ['Warning: something odd'], events: [text('fine')] }] },
+  }, async h => {
+    const server = await spawnServer(h.home)
+    const err = { text: '' }
+    server.transport.stderr?.on('data', (c: Buffer) => { err.text += c.toString() })
+    try {
+      const { data } = await server.call('open', { subagent: 'agent', cwd: h.dir })
+      const done = await server.call('prompt', { session: data.session, text: 'go' })
+      assert.deepEqual([done.data.status, done.data.output], ['done', 'fine'])
+      assert.match(err.text, /\[pi-acp\] ignored: Warning: something odd/)
+    } finally {
+      await server.close()
+    }
+  }))
+
+  const COMMANDS = [{ name: 'review', description: 'Review' }, { name: 'skill:x', description: 'X' }, { name: 'ext' }]
+  const EXPECTED = [{ name: 'review', description: 'Review' }, { name: 'skill:x', description: 'X' }, { name: 'ext', description: '' }]
+
+  test('U308 commands arrive after open; a command without a description gets an empty one', () => withHarness({ adapter: 'pi', pi: { commands: COMMANDS } }, async h => {
+    const { session } = await open(h)
+    await until(() => h.manager.progress(session).commands.length === 3, 5000, 'commands')
+    assert.deepEqual(h.manager.progress(session).commands, EXPECTED)
+  }))
+
+  for (const method of ['session/resume', 'session/load'] as const) {
+    test(`U308 ${method} driven directly: commands follow the response${method === 'session/load' ? ' and the replay' : ''}`, () => withHarness({
+      adapter: 'pi',
+      pi: { commands: COMMANDS, messages_delay_ms: 500 },
+    }, async h => {
+      const id = 'known-session'
+      await mkdir(h.piSessions, { recursive: true })
+      await writeFile(join(h.piSessions, `${id}.jsonl`), `${JSON.stringify({ role: 'user', content: 'earlier' })}\n`)
+      const messages = await driveBridge(h, [
+        { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } } },
+        { jsonrpc: '2.0', id: 2, method, params: { sessionId: id, cwd: h.dir, mcpServers: [] } },
+      ], m => m.params?.update?.sessionUpdate === 'available_commands_update')
+      const order = messages.map(m => (m.id === 2 ? 'response' : String(m.params?.update?.sessionUpdate ?? m.method ?? m.id)))
+      const response = order.indexOf('response')
+      const commands = order.indexOf('available_commands_update')
+      assert.ok(response >= 0 && commands > response, order.join(','))
+      method === 'session/load' && assert.ok(order.indexOf('user_message_chunk') >= 0 && order.indexOf('user_message_chunk') < response, order.join(','))
+      assert.deepEqual(messages[commands].params?.update?.availableCommands?.map((c: { name: string; description: string }) => ({ name: c.name, description: c.description })), EXPECTED)
+    }))
+  }
+})
+
+interface RpcLine {
+  id?: number
+  method?: string
+  // JSON-RPC lines read back from the bridge; only the fields the assertions use are typed
+  params?: { update?: { sessionUpdate?: string; availableCommands?: Array<{ name: string; description: string }> } }
+}
+
+/** Run the pi bridge from source over the fake pi, write the given JSON-RPC lines, read until `done` matches. */
+async function driveBridge(h: Harness, lines: object[], done: (message: RpcLine) => boolean): Promise<RpcLine[]> {
+  const agent = h.config.subagents.agent
+  const child = spawn(process.execPath, ['--import', TSX, PI_BRIDGE_SOURCE], {
+    cwd: h.dir,
+    env: { ...process.env, ...agent.env, PI_PATH: agent.path },
+    stdio: ['pipe', 'pipe', 'inherit'],
+  })
+  const messages: RpcLine[] = []
+  const buffer = { text: '' }
+  child.stdout.on('data', (chunk: Buffer) => {
+    const parts = `${buffer.text}${chunk.toString()}`.split('\n')
+    buffer.text = parts.pop() ?? ''
+    parts.filter(Boolean).forEach(line => messages.push(JSON.parse(line)))
+  })
+  lines.forEach(line => child.stdin.write(`${JSON.stringify(line)}\n`))
+  try {
+    await until(() => messages.some(done), 10_000, 'bridge messages')
+    return messages
+  } finally {
+    child.stdin.end()
+    await until(() => child.exitCode !== null, 5000, 'bridge exits')
+  }
+}
 
 /** A form with a single select, a multi select, a number and a boolean field. */
 const FORM: acp.ElicitationSchema = {

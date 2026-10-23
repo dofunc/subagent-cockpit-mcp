@@ -14,6 +14,7 @@ import grokDarkIcon from '../icons/grok-dark.svg'
 import grokIcon from '../icons/grok.svg'
 import opencodeDarkIcon from '../icons/opencode-dark.svg'
 import opencodeIcon from '../icons/opencode.svg'
+import piIcon from '../icons/pi.svg'
 
 export const STATE_BADGES: Record<AgentState, BadgeProps['status']> = {
   OPENING: 'default',
@@ -34,8 +35,8 @@ const CLOSE_REASONS: Record<SessionCloseReason, MessageKey> = {
 
 /** Official platform marks from assets/overview-light.svg and overview-dark.svg; the black ones turn white in dark */
 const ADAPTER_ICONS: Record<'light' | 'dark', Record<string, string>> = {
-  light: { codex: codexIcon, claude: claudeIcon, grok: grokIcon, opencode: opencodeIcon, antigravity: antigravityIcon },
-  dark: { codex: codexDarkIcon, claude: claudeIcon, grok: grokDarkIcon, opencode: opencodeDarkIcon, antigravity: antigravityIcon },
+  light: { codex: codexIcon, claude: claudeIcon, grok: grokIcon, opencode: opencodeIcon, antigravity: antigravityIcon, pi: piIcon },
+  dark: { codex: codexDarkIcon, claude: claudeIcon, grok: grokDarkIcon, opencode: opencodeDarkIcon, antigravity: antigravityIcon, pi: piIcon },
 }
 
 /** The token behind each Badge status dot, so the state text matches its dot. */

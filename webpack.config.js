@@ -18,6 +18,8 @@ export default [
       'claude-agent-acp': '@agentclientprotocol/claude-agent-acp/dist/index.js',
       // Our own ACP bridge over `agy -p`
       'agy-acp': './src/bridge/agy-acp.ts',
+      // Our own ACP bridge over `pi --mode rpc`
+      'pi-acp': './src/bridge/pi-acp.ts',
       // The webui process, started by the first MCP server that finds no webui on the port
       webui: './src/webui/server.ts',
     },

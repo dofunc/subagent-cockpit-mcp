@@ -6,7 +6,7 @@ import { CockpitError } from './adapter/adapter'
 import type { ApprovalVerb } from './adapter/adapter'
 import type { ConversationStore } from './conversation-store'
 import type { SessionManager } from './session/session-manager'
-import type { AnswerAction, AnswerContent, ConversationItemKind, SnapshotItem, SnapshotResult } from './types'
+import type { AnswerAction, AnswerContent, ConversationItemKind, ItemResult, SnapshotItem, SnapshotResult } from './types'
 
 type Args = NonNullable<CallToolRequest['params']['arguments']>
 type Handler = (args: Args, signal: AbortSignal) => Promise<object> | object
@@ -143,8 +143,17 @@ const SNAPSHOT_DESCRIPTION = [
   'their input, output and diffs, plans, approvals, questions and agent-specific messages, plus each session\'s',
   'state and pending notifications. It can be large: pass session, and use last, types or exclude_types to keep',
   'it small. Pass back server_id and seq as since to get only what changed. ack is for UI clients that relay',
-  'notifications.',
+  'notifications. UI clients that poll: pass simplify to leave out tool call details (input, output, content) and',
+  'session commands, and get one item in full with item.',
 ].join(' ')
+
+const ITEM_DESCRIPTION = [
+  'One conversation item in full, by the id snapshot gave it: a tool call with its input, output and diffs,',
+  'or any other item. For UI clients that poll snapshot with simplify and show details on demand.',
+].join(' ')
+
+/** What the webui shows of a collapsed tool call: the card's label (ToolCallCard.tsx) and the bubble header (child_session). */
+const TOOL_HEADER_FIELDS = ['sessionUpdate', 'toolCallId', 'title', 'kind', 'status', 'tool_name', 'subagent_state', 'locations', 'child_session']
 
 // ── Tools ──
 
@@ -294,6 +303,7 @@ const SPECS: ToolSpec[] = [
       types: { ...ITEM_KIND_LIST, description: 'Only these item kinds' },
       exclude_types: { ...ITEM_KIND_LIST, description: 'Leave these item kinds out' },
       last: { type: 'integer', minimum: 1, description: 'Only the last n items, after the kind filters' },
+      simplify: { type: 'boolean', description: 'Tool items keep only their title, status and other header fields; commands are left out' },
     },
     output: object({
       server_id: str,
@@ -307,8 +317,15 @@ const SPECS: ToolSpec[] = [
           key: str, type: oneOf('turn', 'approval', 'question'), turn_id: num, outcome: oneOf('done', 'cancelled', 'error'), approval: APPROVAL, question: QUESTION,
         }, ['key', 'type'])),
         items: list(SNAPSHOT_ITEM),
-      }, [...SESSION_STATE_KEYS, ...Object.keys(PROGRESS), 'config_options', 'notifications', 'items'])),
+      }, [...SESSION_STATE_KEYS, ...Object.keys(PROGRESS).filter(key => key !== 'commands'), 'config_options', 'notifications', 'items'])),
     }, ['server_id', 'seq', 'reset', 'sessions']),
+  },
+  {
+    name: 'item',
+    description: ITEM_DESCRIPTION,
+    params: { session, id: { type: 'string', description: 'Item id from snapshot' } },
+    required: ['session', 'id'],
+    output: object({ item: SNAPSHOT_ITEM }, ['item']),
   },
 ]
 
@@ -423,8 +440,28 @@ function snapshot(manager: SessionManager, store: ConversationStore, args: Args)
   const base = manager.snapshot({ session: optStr(args, 'session'), since, server_id: optStr(args, 'server_id'), ack: optStrList(args, 'ack') })
   const reset = since === undefined || optStr(args, 'server_id') !== base.server_id || base.sessions.some(s => store.lostSince(s.session, since))
   const [types, exclude, last] = [optKinds(args, 'types'), optKinds(args, 'exclude_types'), optNum(args, 'last')]
-  const sessions = base.sessions.map(s => ({ ...s, items: pick(store.items(s.session, reset ? undefined : since), types, exclude, last) }))
+  const simplify = optBool(args, 'simplify', false)
+  const sessions = base.sessions.map(({ commands, ...s }) => {
+    const items = pick(store.items(s.session, reset ? undefined : since), types, exclude, last)
+    return simplify ? { ...s, items: items.map(toolHeader) } : { ...s, commands, items }
+  })
   return { server_id: base.server_id, seq: store.seq, reset, sessions }
+}
+
+/** A tool item cut down to what its collapsed card shows; the details come one item at a time from `item`. */
+function toolHeader(item: SnapshotItem): SnapshotItem {
+  if (item.kind !== 'tool') return item
+  return { ...item, data: Object.fromEntries(Object.entries(item.data).filter(([key]) => TOOL_HEADER_FIELDS.includes(key))) }
+}
+
+/** `item`: one item of an open session in full, as a snapshot without simplify has it. Reads only, acks nothing. */
+function item(manager: SessionManager, store: ConversationStore, args: Args): ItemResult {
+  const [session, id] = [reqStr(args, 'session'), reqStr(args, 'id')]
+  // The same check as snapshot's session: SESSION_NOT_FOUND unless the session is open in this server
+  manager.snapshot({ session })
+  const found = store.item(session, id)
+  if (!found) throw new CockpitError('ITEM_NOT_FOUND', `No item ${id} in session ${session}`)
+  return { item: found }
 }
 
 // ── Handlers ──
@@ -476,6 +513,7 @@ function handlers(manager: SessionManager, store: ConversationStore): Record<str
     close: args => manager.close(optStr(args, 'session')),
     delete: args => manager.delete(reqStr(args, 'session')),
     snapshot: args => snapshot(manager, store, args),
+    item: args => item(manager, store, args),
   }
 }
 

@@ -16,6 +16,7 @@ export type ErrorCode =
   | 'AGENT_VERSION_UNSUPPORTED'
   | 'INVALID_OPTION'
   | 'AGENT_ERROR'
+  | 'ITEM_NOT_FOUND'
 
 // ── Config ──
 
@@ -64,7 +65,7 @@ export interface OpenParams {
   role?: string
 }
 
-/** `snapshot` params. Applied in order: session, since, types, exclude_types, then last. */
+/** `snapshot` params. Applied in order: session, since, types, exclude_types, last, then simplify. */
 export interface SnapshotParams {
   session?: string
   since?: number
@@ -73,6 +74,14 @@ export interface SnapshotParams {
   types?: ConversationItemKind[]
   exclude_types?: ConversationItemKind[]
   last?: number
+  /** Tool items keep only what a collapsed tool call shows, and sessions leave commands out */
+  simplify?: boolean
+}
+
+/** `item` params: one conversation item in full, by the id snapshot gave it. */
+export interface ItemParams {
+  session: string
+  id: string
 }
 
 // ── Tool results ──
@@ -268,8 +277,12 @@ export interface SessionSnapshotBase extends SessionState, ProgressResult {
   notifications: NotificationItem[]
 }
 
-/** One session of `snapshot`: its state and feedback, and the conversation the webui shows for it. */
-export interface SessionSnapshot extends SessionSnapshotBase {
+/**
+ * One session of `snapshot`: its state and feedback, and the conversation the webui shows for it.
+ * commands is left out when simplify is set; `progress` has it.
+ */
+export interface SessionSnapshot extends Omit<SessionSnapshotBase, 'commands'> {
+  commands?: CommandInfo[]
   items: SnapshotItem[]
 }
 
@@ -279,6 +292,11 @@ export interface SnapshotResult {
   seq: number
   reset: boolean
   sessions: SessionSnapshot[]
+}
+
+/** Result of `item`: the item as a snapshot without simplify returns it. */
+export interface ItemResult {
+  item: SnapshotItem
 }
 
 // ── webui monitor ──

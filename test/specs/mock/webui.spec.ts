@@ -58,9 +58,12 @@ const center = async (locator: Locator) => {
 test.describe('mock: webui page', () => {
   test('W1 the session list groups sessions by subagent with state, disconnect mark and tooltip', async ({ page }) => {
     await openPage(page)
-    for (const group of ['Coder', 'Reviewer', 'Planner', 'Releaser', 'Inspector', 'Writer', 'Cleanup']) {
+    for (const group of ['Coder', 'Reviewer', 'Planner', 'Releaser', 'Inspector', 'Writer', 'Cleanup', 'Tester']) {
       await expect(page.getByRole('menuitem', { name: group, exact: true }).locator('img')).toHaveCount(1)
     }
+    // The pi group carries pi's own mark, inlined as a base64 data URI
+    const piSrc = await page.getByRole('menuitem', { name: 'Tester', exact: true }).locator('img').getAttribute('src') ?? ''
+    expect(Buffer.from(piSrc.replace(/^data:image\/svg\+xml;base64,/, ''), 'base64').toString('utf-8')).toContain('#F09082')
     await expect(page.getByRole('menuitem', { name: /^Add input validation .* IDLE$/ })).toBeVisible()
     await expect(page.getByRole('menuitem', { name: 'Fix the navbar overflow CLOSED' })).toBeVisible()
     await expect(page.getByRole('menuitem', { name: 'Fix lint warnings disconnect IDLE' }).getByRole('img', { name: 'disconnect' })).toBeVisible()

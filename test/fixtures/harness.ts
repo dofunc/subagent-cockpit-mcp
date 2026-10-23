@@ -1,6 +1,6 @@
 // Test harness: registers the scripted agent as the `codex` and `claude` adapters, keeps the real `grok` and
-// `opencode` adapters behind fake programs, runs the agy bridge from source over a fake agy for `antigravity`,
-// and builds isolated homes.
+// `opencode` adapters behind fake programs, runs the agy bridge from source over a fake agy for `antigravity`
+// and the pi bridge from source over a fake pi for `pi`, and builds isolated homes.
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,6 +12,7 @@ import type { CommandSpec } from '../../src/adapter/adapter'
 import { AntigravityAdapter } from '../../src/adapter/antigravity-adapter'
 import { ClaudeAdapter } from '../../src/adapter/claude-adapter'
 import { CodexAdapter } from '../../src/adapter/codex-adapter'
+import { PiAdapter } from '../../src/adapter/pi-adapter'
 import { ConversationStore } from '../../src/conversation-store'
 import '../../src/adapter/grok-adapter'
 import '../../src/adapter/opencode-adapter'
@@ -21,11 +22,14 @@ import { SessionManager } from '../../src/session/session-manager'
 import type { SessionActivity } from '../../src/session/session-manager'
 import type { AppConfig, NativeDeleteResult, ProfileConfig, SubagentConfig } from '../../src/types'
 import type { FakeAgyScript } from './fake-agy'
+import type { FakePiScript } from './fake-pi'
 import type { Script } from './scripted-acp-agent'
 
 export const FIXTURE = fileURLToPath(new URL('./scripted-acp-agent.ts', import.meta.url))
 export const FAKE_AGY = fileURLToPath(new URL('./fake-agy.ts', import.meta.url))
 const BRIDGE_SOURCE = fileURLToPath(new URL('../../src/bridge/agy-acp.ts', import.meta.url))
+export const FAKE_PI = fileURLToPath(new URL('./fake-pi.ts', import.meta.url))
+export const PI_BRIDGE_SOURCE = fileURLToPath(new URL('../../src/bridge/pi-acp.ts', import.meta.url))
 export const TSX = import.meta.resolve('tsx')
 export const HARNESS = fileURLToPath(import.meta.url)
 
@@ -59,9 +63,21 @@ export class AntigravitySourceAdapter extends AntigravityAdapter {
   }
 }
 
+/**
+ * PiAdapter running the bridge from source; PI_PATH points at the fake pi program. The real getCommand still runs
+ * (mode hint, args after the bridge); only the bundled entry is swapped for the source one.
+ */
+export class PiSourceAdapter extends PiAdapter {
+  protected getCommand(config: SubagentConfig, env: Record<string, string>, program: string): CommandSpec {
+    const command = super.getCommand(config, env, program)
+    return { ...command, command: process.execPath, args: ['--import', TSX, PI_BRIDGE_SOURCE, ...config.args] }
+  }
+}
+
 registerAdapter('codex', FixtureAdapter)
 registerAdapter('claude', ClaudeFixtureAdapter)
 registerAdapter('antigravity', AntigravitySourceAdapter)
+registerAdapter('pi', PiSourceAdapter)
 
 /** Version line each fake local program prints for `--version`. */
 export const FAKE_VERSIONS = {
@@ -70,6 +86,7 @@ export const FAKE_VERSIONS = {
   grok: 'grok 1.0.46 (fixture)',
   opencode: 'opencode v2.0.30',
   antigravity: '1.4.2',
+  pi: '1.4.0',
 }
 
 /** Adapters whose agent program speaks ACP itself; their fake program runs the scripted agent with the real argv. */
@@ -107,6 +124,17 @@ export async function fakeAgyProgram(path: string): Promise<string> {
   return path
 }
 
+/** Fake pi: `--version` answers like pi, everything else runs fake-pi.ts with the same argv. */
+export async function fakePiProgram(path: string): Promise<string> {
+  await writeFile(path, [
+    '#!/bin/sh',
+    `[ "$1" = "--version" ] && { echo "${FAKE_VERSIONS.pi}"; exit 0; }`,
+    `exec "${process.execPath}" --import "${TSX}" "${FAKE_PI}" "$@"`,
+  ].join('\n'))
+  await chmod(path, 0o755)
+  return path
+}
+
 export interface LogEntry {
   pid: number
   event: string
@@ -126,6 +154,10 @@ export interface Harness {
   setScript(name: string, script: Script): Promise<void>
   /** Replace the fake agy script; processes started afterwards read the new one */
   setAgy(script: FakeAgyScript): Promise<void>
+  /** Replace the fake pi script; processes started afterwards read the new one */
+  setPi(script: FakePiScript): Promise<void>
+  /** Where the fake pi keeps its session files (<id>.jsonl) */
+  piSessions: string
   log(): Promise<LogEntry[]>
   events(name: string): Promise<LogEntry[]>
   cleanup(): Promise<void>
@@ -138,11 +170,13 @@ export interface HarnessOptions {
   snapshot?: Partial<AppConfig['snapshot']>
   /**
    * Adapter of every scripted subagent (default codex). grok and opencode run the real adapter with a fake program,
-   * antigravity runs the bridge from source over the fake agy.
+   * antigravity runs the bridge from source over the fake agy, pi the pi bridge over the fake pi.
    */
-  adapter?: 'codex' | 'claude' | 'grok' | 'opencode' | 'antigravity'
+  adapter?: 'codex' | 'claude' | 'grok' | 'opencode' | 'antigravity' | 'pi'
   /** Fake agy script for the antigravity adapter (default { turns: [] }) */
   agy?: FakeAgyScript
+  /** Fake pi script for the pi adapter (default { turns: [] }) */
+  pi?: FakePiScript
   subagent?: Partial<SubagentConfig>
   env?: Record<string, Record<string, string>>
   profiles?: Record<string, ProfileConfig>
@@ -165,15 +199,24 @@ export async function setup(opts: HarnessOptions = {}): Promise<Harness> {
   const fakePath = join(dir, `fake-${adapter}`)
   const program = adapter === 'antigravity'
     ? await fakeAgyProgram(fakePath)
-    : NATIVE_ACP.has(adapter)
-      ? await fakeAcpProgram(fakePath, FAKE_VERSIONS[adapter])
-      : await fakeProgram(fakePath, FAKE_VERSIONS[adapter])
+    : adapter === 'pi'
+      ? await fakePiProgram(fakePath)
+      : NATIVE_ACP.has(adapter)
+        ? await fakeAcpProgram(fakePath, FAKE_VERSIONS[adapter])
+        : await fakeProgram(fakePath, FAKE_VERSIONS[adapter])
   const scripts = opts.scripts ?? { agent: {} }
   const scriptPath = (name: string) => join(dir, `${name}.script.json`)
   const agyPath = join(dir, 'agy.script.json')
   await Promise.all(Object.entries(scripts).map(([name, s]) => writeFile(scriptPath(name), JSON.stringify(s))))
+  const piPath = join(dir, 'pi.script.json')
+  const piSessions = join(dir, 'pi-sessions')
   await writeFile(agyPath, JSON.stringify(opts.agy ?? { turns: [] }))
-  const agyEnv = adapter === 'antigravity' ? { FAKE_AGY_SCRIPT: agyPath, FAKE_AGY_LOG: logPath } : {}
+  await writeFile(piPath, JSON.stringify(opts.pi ?? { turns: [] }))
+  const agyEnv = adapter === 'antigravity'
+    ? { FAKE_AGY_SCRIPT: agyPath, FAKE_AGY_LOG: logPath }
+    : adapter === 'pi'
+      ? { FAKE_PI_SCRIPT: piPath, FAKE_PI_LOG: logPath, FAKE_PI_DIR: piSessions }
+      : {}
   const config: AppConfig = {
     idle: opts.idle ?? { timeout: 0 },
     // Second guard after SUBAGENT_COCKPIT_WEBUI_PORT=0: tests never reach the user's webui
@@ -206,6 +249,8 @@ export async function setup(opts: HarnessOptions = {}): Promise<Harness> {
     scriptPath,
     setScript: (name, s) => writeFile(scriptPath(name), JSON.stringify(s)),
     setAgy: s => writeFile(agyPath, JSON.stringify(s)),
+    setPi: s => writeFile(piPath, JSON.stringify(s)),
+    piSessions,
     log,
     events: async event => (await log()).filter(e => e.event === event),
     async cleanup() {

@@ -45,6 +45,11 @@ export class ConversationStore {
       .filter(item => since === undefined || item.rev > since)
   }
 
+  /** One item of a session as `items` gives it; undefined when the session or the item is not kept. */
+  item(session: string, id: string): SnapshotItem | undefined {
+    return this.items(session, undefined).find(item => item.id === id)
+  }
+
   private apply({ session, activity }: SessionActivity): void {
     if (activity.kind === 'session_closed' && activity.reason === 'deleted') {
       this.views.delete(session)

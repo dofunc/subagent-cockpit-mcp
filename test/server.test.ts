@@ -19,7 +19,7 @@ import type { Step } from './fixtures/scripted-acp-agent'
 
 const DIST_CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
 
-const TOOL_NAMES = ['subagents', 'sessions', 'open', 'prompt', 'approve', 'allow', 'reject', 'answer', 'cancel', 'set_config', 'status', 'progress', 'output', 'close', 'delete', 'snapshot']
+const TOOL_NAMES = ['subagents', 'sessions', 'open', 'prompt', 'approve', 'allow', 'reject', 'answer', 'cancel', 'set_config', 'status', 'progress', 'output', 'close', 'delete', 'snapshot', 'item']
 
 interface Context {
   h: Harness
@@ -62,7 +62,7 @@ async function structured(client: Client, params: CallToolRequest['params']): Pr
 }
 
 describe('MCP server', () => {
-  test('U47 the built server lists all 16 tools, each with an outputSchema', async () => {
+  test('U47 the built server lists all 17 tools, each with an outputSchema', async () => {
     const home = await mkdtemp(join(tmpdir(), 'cockpit-mcp-'))
     const client = new Client({ name: 'test', version: '1' })
     try {
@@ -249,7 +249,12 @@ describe('MCP server', () => {
   })
 })
 
-interface Snap { server_id: string; seq: number; reset: boolean; sessions: Array<{ session: string; items: SnapshotItem[] }> }
+interface Snap {
+  server_id: string
+  seq: number
+  reset: boolean
+  sessions: Array<{ session: string; items: SnapshotItem[]; commands?: Array<{ name: string }>; notifications: Array<{ key: string; type: string }> }>
+}
 
 /** snapshot through the MCP client, as plain data. */
 async function snap(client: Client, args: Record<string, unknown> = {}): Promise<Snap> {
@@ -415,6 +420,120 @@ describe('snapshot', () => {
     assert.ok(seen.some(a => a.session === session && a.activity.kind === 'session_closed' && a.activity.reason === 'deleted'))
     assert.deepEqual(h.store.items(session, undefined), [])
     assert.equal(h.store.lostSince(session, 0), false)
+  }))
+})
+
+describe('simplify snapshot and item', () => {
+  const DIFF = { type: 'diff', path: '/repo/a.ts', oldText: 'a', newText: 'b' }
+  const TOOL_CALL = {
+    update: { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'Edit a.ts', kind: 'edit', status: 'pending', rawInput: { path: 'a.ts' }, locations: [{ path: '/repo/a.ts', line: 3 }], _meta: { trace: 'x' } },
+  } satisfies Step
+  const DETAILED: Step[] = [
+    TOOL_CALL,
+    { update: { sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed', content: [DIFF], rawOutput: { ok: true } } },
+  ]
+  const PLAN = { update: { sessionUpdate: 'plan', entries: [{ content: 'a', priority: 'high', status: 'in_progress' }] } } satisfies Step
+  const COMMANDS = { update: { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'review', description: 'Review' }] } } satisfies Step
+  const TURN: Step[] = [{ chunk: 'Hello' }, ...DETAILED, PLAN, COMMANDS]
+  const pending = (id: string): Step => ({ update: { sessionUpdate: 'tool_call', toolCallId: id, title: `Run ${id}`, kind: 'execute', status: 'pending' } })
+  const itemVia = (client: Client, session: string, id: string) => client.callTool({ name: 'item', arguments: { session, id } })
+  const withoutData = ({ data: _data, ...rest }: SnapshotItem) => rest
+
+  test('U289 simplify keeps what a collapsed tool call shows and leaves commands out', () => withHarness({ scripts: { agent: { turns: [TURN] } } }, async ({ h, client }) => {
+    const session = await openVia(client, h)
+    await promptVia(client, session, 'go')
+    const [full, simplify] = [await snap(client, { session }), await snap(client, { session, simplify: true })]
+    const [fullTool, simpleTool] = [itemsOf(full, session), itemsOf(simplify, session)].map(items => items.find(i => i.kind === 'tool'))
+    assert.ok(fullTool && simpleTool)
+    assert.ok(['content', 'rawInput', 'rawOutput', '_meta'].every(key => key in fullTool.data))
+    assert.deepEqual(Object.keys(simpleTool.data).sort(), ['kind', 'locations', 'sessionUpdate', 'status', 'title', 'toolCallId'])
+    assert.deepEqual(simpleTool.data.locations, [{ path: '/repo/a.ts', line: 3 }])
+    assert.deepEqual(withoutData(simpleTool), withoutData(fullTool))
+    assert.deepEqual(itemsOf(simplify, session).filter(i => i.kind !== 'tool'), itemsOf(full, session).filter(i => i.kind !== 'tool'))
+    assert.deepEqual(full.sessions[0].commands?.map(c => c.name), ['review'])
+    assert.ok(!('commands' in simplify.sessions[0]))
+    assert.deepEqual([simplify.seq, simplify.reset, simplify.sessions[0].notifications], [full.seq, full.reset, full.sessions[0].notifications])
+  }))
+
+  test('U289 simplify keeps the child session of an OpenCode tool call', () => withHarness({
+    adapter: 'opencode',
+    scripts: { agent: { turns: [[{ update: { ...TOOL_CALL.update, _meta: { 'opencode/child-session': { id: 'ses_child', title: 'Check workflows' } } } }]] } },
+  }, async ({ h, client }) => {
+    const session = await openVia(client, h)
+    await promptVia(client, session, 'go')
+    const tool = itemsOf(await snap(client, { session, simplify: true }), session).find(i => i.kind === 'tool')
+    assert.deepEqual(tool?.data.child_session, { id: 'ses_child', title: 'Check workflows' })
+    assert.ok(tool && !('_meta' in tool.data) && !('rawInput' in tool.data))
+  }))
+
+  test('U290 simplify with since, types and last returns only the tool that changed', () => withHarness({
+    scripts: { agent: { turns: [[pending('a'), pending('b'), { sleep: 800 }, { update: { sessionUpdate: 'tool_call_update', toolCallId: 'a', status: 'completed', content: [DIFF] } }]] } },
+  }, async ({ h, client }) => {
+    const session = await openVia(client, h)
+    await structured(client, { name: 'prompt', arguments: { session, text: 'go', wait: false } })
+    await until(() => h.store.items(session, undefined).filter(i => i.kind === 'tool').length === 2, 5000, 'both tools started')
+    const before = await snap(client)
+    await until(() => h.manager.status(session).state === 'IDLE', 5000, 'turn done')
+    const args = { session, simplify: true, types: ['tool'], last: 1 }
+    const next = await snap(client, { ...args, since: before.seq, server_id: before.server_id })
+    assert.equal(next.reset, false)
+    const [tool, ...rest] = itemsOf(next, session)
+    assert.deepEqual([tool?.id, tool?.data.status, rest.length], ['tool:a', 'completed', 0])
+    assert.ok(tool && tool.rev > before.seq && !('content' in tool.data))
+    const again = await snap(client, { ...args, since: next.seq, server_id: next.server_id })
+    assert.deepEqual([again.reset, itemsOf(again, session)], [false, []])
+  }))
+
+  test('U291 item returns one item in full', () => withHarness({ scripts: { agent: { turns: [TURN] } } }, async ({ h, client }) => {
+    const session = await openVia(client, h)
+    const { turn_id: turn } = await promptVia(client, session, 'go')
+    const full = itemsOf(await snap(client, { session }), session)
+    const ids = [full.find(i => i.kind === 'tool')?.id, full.find(i => i.kind === 'message')?.id, `turn:${turn}`]
+    const items = await Promise.all(ids.map(async id => JSON.parse(JSON.stringify((await structured(client, { name: 'item', arguments: { session, id } })).item))))
+    assert.deepEqual(items, ids.map(id => full.find(i => i.id === id)))
+    assert.deepEqual(items[0].data.content, [{ type: 'diff', ...DIFF }])
+  }))
+
+  test('U292 item errors: a session not open here, an unknown or dropped item', () => withHarness({
+    snapshot: { max_message_count: 10 },
+    scripts: { agent: { turns: [[{ chunk: 'a' }], [{ chunks: 20 }]] } },
+  }, async ({ h, client }) => {
+    const [session, closed] = [await openVia(client, h), await openVia(client, h)]
+    const { turn_id: first } = await promptVia(client, session, 'one')
+    await promptVia(client, session, 'two')
+    assert.ok(!h.store.items(session, undefined).some(i => i.id === `prompt:${first}`))
+    await structured(client, { name: 'close', arguments: { session: closed } })
+    const calls = [itemVia(client, 'codex_nope', 'x'), itemVia(client, closed, 'x'), itemVia(client, session, 'nope'), itemVia(client, session, `prompt:${first}`)]
+    const results = await Promise.all(calls)
+    assert.deepEqual(results.map(r => parseReply(r).data.code), ['SESSION_NOT_FOUND', 'SESSION_NOT_FOUND', 'ITEM_NOT_FOUND', 'ITEM_NOT_FOUND'])
+    assert.ok(results.every(r => r.isError === true && r.structuredContent === undefined))
+    assert.match(String(parseReply(results[2]).data.message), new RegExp(`nope.*${session}`))
+  }))
+
+  test('U293 simplify and item arguments are checked against the declared schema', () => withHarness({}, async ({ client }) => {
+    const bad: CallToolRequest['params'][] = [
+      { name: 'snapshot', arguments: { simplify: 'true' } },
+      { name: 'item', arguments: { session: 'codex_x' } },
+      { name: 'item', arguments: { session: 'codex_x', id: 1 } },
+      { name: 'item', arguments: { session: 'codex_x', id: 'x', since: 1 } },
+    ]
+    await Promise.all(bad.map(c => assert.rejects(client.callTool(c), { code: ErrorCode.InvalidParams }, JSON.stringify(c))))
+  }))
+
+  test('U294 item leaves notifications, revisions and the agent alone', () => withHarness({ scripts: { agent: { turns: [[{ chunk: 'x' }]] } } }, async ({ h, client }) => {
+    const session = await openVia(client, h)
+    // Not waited for, so the turn's notification stays undelivered
+    const { turn_id: turn } = await structured(client, { name: 'prompt', arguments: { session, text: 'go', wait: false } })
+    await until(() => h.manager.status(session).state === 'IDLE', 5000, 'turn done')
+    const before = await snap(client, { session })
+    const requests = async () => [(await h.events('start')).length, (await h.events('prompt')).length]
+    const counted = await requests()
+    await structured(client, { name: 'item', arguments: { session, id: `turn:${turn}` } })
+    const after = await snap(client, { session })
+    assert.equal(after.seq, before.seq)
+    assert.ok(after.sessions[0].notifications.some(n => n.type === 'turn'))
+    assert.deepEqual(after.sessions[0].notifications, before.sessions[0].notifications)
+    assert.deepEqual(await requests(), counted)
   }))
 })
 

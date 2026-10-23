@@ -1,15 +1,15 @@
 # subagent-cockpit-mcp
 
-> One MCP server, five coding agents from five vendors: OpenAI Codex, Claude Code, Grok, OpenCode and Google Antigravity.
+> One MCP server, six coding agents from six vendors: OpenAI Codex, Claude Code, Grok, OpenCode, Google Antigravity and Pi.
 
 Let the agent you already use (Claude Code, Codex CLI, Cursor, any MCP client) hand work to the other coding agents on your machine. One writes the code, the others review it, test it and draft the release notes.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/overview-dark.svg">
-  <img alt="The main agent talks MCP to subagent-cockpit-mcp, which fans out over ACP to Codex, Claude Code, Grok Build, OpenCode and Antigravity, and reports the activity to a read-only web UI monitor. Its tools cover prompts, approvals, questions, snapshots, sessions and config" src="assets/overview-light.svg">
+  <img alt="The main agent talks MCP to subagent-cockpit-mcp, which fans out over ACP to Codex, Claude Code, Grok Build, OpenCode, Antigravity and Pi, and reports the activity to a read-only web UI monitor. Its tools cover prompts, approvals, questions, snapshots, sessions and config" src="assets/overview-light.svg">
 </picture>
 
-- Mix vendors. Each role gets the agent and model that suits it, all behind the same 16 tools.
+- Mix vendors. Each role gets the agent and model that suits it, all behind the same 17 tools.
 - Work in parallel. `prompt(wait: false)` sends tasks to several agents at once, `status` and `output` collect the results.
 - Keep context. Review findings go back to the session that wrote the code. Reconnect to a session by id days later.
 - Stay in charge. Approvals and questions come back to the main agent, and `allow` lasts for one session only.
@@ -43,6 +43,7 @@ Open `http://127.0.0.1:7200` to watch the sessions: replies as they stream, tool
    | xAI Grok Build | 1.0.46+ | `brew install --cask grok-build` |
    | OpenCode | 2.0.30+ | `brew install opencode` (the 1.x `opencode-ai` on npm is not supported) |
    | Google Antigravity | 1.4.2+ | `brew install --cask antigravity-cli`, then run `agy` once to sign in |
+   | Earendil Pi | 1.4.0+ | `brew install pi-coding-agent` or `npm i -g @earendil-works/pi-coding-agent` (Node 22.19+), then run `pi` and `/login`, or give it a provider key in `env` |
 
 2. Add the server to your MCP client:
 
@@ -80,13 +81,14 @@ Open `http://127.0.0.1:7200` to watch the sessions: replies as they stream, tool
      "reviewer": { "adapter": "claude",      "mode": "plan", "role": "You review diffs. Report findings, do not edit files." },
      "security": { "adapter": "grok",        "role": "You look for security issues in diffs. Do not edit files." },
      "tester":   { "adapter": "opencode",    "role": "You run the test suite and report failures." },
-     "docs":     { "adapter": "antigravity", "model": "gemini-3.8-flash", "role": "You draft release notes as text. Do not edit files." }
+     "docs":     { "adapter": "antigravity", "model": "gemini-3.8-flash", "role": "You draft release notes as text. Do not edit files." },
+     "unit":     { "adapter": "pi",          "model": "anthropic/claude-sonnet-5-5", "role": "You write unit tests for new code." }
    }
    ```
 
 4. Ask your main agent:
 
-   > Use subagent-cockpit. Have the coder add rate limiting to the API. Have the reviewer and the security subagent review the diff, and send their findings back to the coder until both pass. Then have the tester run npm test, ask the docs subagent for release notes, and report.
+   > Use subagent-cockpit. Have the coder add rate limiting to the API and the unit subagent write tests for it. Have the reviewer and the security subagent review the diff, and send their findings back to the coder until both pass. Then have the tester run npm test, ask the docs subagent for release notes, and report.
 
 ## Supported agents
 
@@ -97,8 +99,9 @@ Open `http://127.0.0.1:7200` to watch the sessions: replies as they stream, tool
 | Grok Build | grok's own ACP | yes | plain text only | deletes the session files |
 | OpenCode | opencode's own ACP | yes | `question` tool | deletes the session |
 | Antigravity | bundled bridge over `agy -p` | denied by agy, see [notes](#notes) | skipped by agy | not supported |
+| Pi | bundled bridge over `pi --mode rpc` | never asked, see [notes](#notes) | not asked | deletes the session file |
 
-Verified with codex 0.162.1, claude 2.1.292, grok 1.0.46, opencode 2.0.30 and agy 1.4.3. There is no upper version bound. A release that breaks the protocol fails with `AGENT_ERROR` until the server is updated. This is the ACP rewrite of [subagent-cli](https://github.com/yejianfei/subagent-cli).
+Verified with codex 0.162.1, claude 2.1.292, grok 1.0.46, opencode 2.0.30, agy 1.4.3 and pi 1.4.0. There is no upper version bound. A release that breaks the protocol fails with `AGENT_ERROR` until the server is updated. This is the ACP rewrite of [subagent-cli](https://github.com/yejianfei/subagent-cli).
 
 ## Tools
 
@@ -107,7 +110,7 @@ Verified with codex 0.162.1, claude 2.1.292, grok 1.0.46, opencode 2.0.30 and ag
 | Prompt | `prompt` sends a task, `cancel` stops the turn, `output` returns the last reply |
 | Approvals | `approve` allows once, `allow` allows similar calls for the rest of the session, `reject` refuses |
 | Questions | `answer` accepts, declines or cancels a question from the agent |
-| Snapshot | `status` shows the state and what is pending, `progress` the agent's plan and context usage, `snapshot` the full conversation |
+| Snapshot | `status` shows the state and what is pending, `progress` the agent's plan and context usage, `snapshot` the full conversation, `item` one item of it |
 | Sessions | `open` creates, reuses or reconnects, `close` keeps the history, `delete` removes it, `sessions` lists them |
 | Config | `subagents` lists the configured agents, `set_config` changes `model`, `reasoning_effort` or `mode` |
 
@@ -124,6 +127,15 @@ Verified with codex 0.162.1, claude 2.1.292, grok 1.0.46, opencode 2.0.30 and ag
 ```
 
 `types` keeps and `exclude_types` drops item kinds (`prompt`, `message`, `thought`, `tool`, `plan`, `turn` and the rest), `last` takes the last few, and `since` with the `seq` and `server_id` of the previous call returns only what changed. `reset: true` means start over from the items returned.
+
+A UI client that polls passes `simplify: true`. Tool calls then come with their title, status and paths only, and each session without its slash commands. It fetches the rest of one item when the person opens it:
+
+```json
+{ "simplify": true, "since": 1287, "server_id": "f3c1…" }
+{ "session": "codex_019a…", "id": "tool:call_2" }
+```
+
+The second line is the `item` call. An item that is no longer kept fails with `ITEM_NOT_FOUND`.
 
 ## Configuration
 
@@ -164,7 +176,7 @@ Conversation items go with the messages behind them. The Web UI keeps the `max_m
 
 | Field | Meaning |
 |---|---|
-| `adapter` | `codex`, `claude`, `grok`, `opencode` or `antigravity` |
+| `adapter` | `codex`, `claude`, `grok`, `opencode`, `antigravity` or `pi` |
 | `description` | Shown by the `subagents` tool |
 | `role` | Role prompt sent to every new session |
 | `model`, `reasoning_effort`, `mode` | Initial settings for new sessions (Claude and OpenCode call the effort `effort`). A session keeps its settings, `set_config` changes included, and gets them back when you reconnect. `open` and `snapshot` list the values each agent accepts |
@@ -179,6 +191,7 @@ Conversation items go with the messages behind them. The Web UI keeps the `max_m
 | Grok | not supported | between `grok agent --no-leader` and `stdio`, e.g. `["--always-approve"]` |
 | OpenCode | `build`, `plan` | after `opencode acp`. Models are `provider/model` |
 | Antigravity | `accept-edits`, `plan`, `auto` | on the `agy` command line. Don't pass `--model`, `--effort`, `--mode`, `--conversation` or `-p` |
+| Pi | not supported | on the `pi` command line. Don't pass `--mode`, `--session`, `--no-session` or `-p`. Models are `provider/id`, and `reasoning_effort` takes pi's thinking levels |
 
 Clients started from a desktop app may hand the server a `PATH` without `/opt/homebrew/bin`. Set `path` then.
 
@@ -207,6 +220,7 @@ The server never logs in and never stores credentials. Each agent uses its own l
 - Grok: a custom endpoint goes in the `config.toml` of a separate `GROK_HOME`, with `XAI_API_KEY` in `env`.
 - OpenCode: point `OPENCODE_CONFIG` at a config whose `providers.openai.settings` sets `baseURL` and `apiKey` (`{env:VAR}`). Add `"transport": "http"` if the gateway has no WebSocket.
 - Antigravity: signs in only from its own terminal UI. For a second account, set `HOME` in `env` and run `HOME=/path/to/home agy` once.
+- Pi: `/login` saves to `auth.json` under `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). A gateway goes in `models.json` in the same directory (`baseUrl`, `api` and an `apiKey` such as `${MY_KEY}`), with the key in `env`. Set `PI_CODING_AGENT_DIR` in `env` to give a subagent its own config.
 
 ### What the agents read from your machine
 
@@ -215,6 +229,7 @@ The server passes settings through and never isolates them.
 - Claude Code and Grok read your Claude Code settings (including `permissions.defaultMode`), plugins and hooks. Isolate Claude Code with `CLAUDE_CONFIG_DIR`, and Grok with another `HOME` plus an explicit `GROK_HOME`.
 - OpenCode reads your Claude Code skills and `CLAUDE.md`. `OPENCODE_DISABLE_CLAUDE_CODE=1` turns that off.
 - Antigravity reads `~/.gemini/antigravity-cli/settings.json` (including `permissions.allow`) under `HOME`.
+- Pi loads skills (also from `~/.agents/skills/` and `.agents/skills/`), extensions, MCP servers, `AGENTS.md` and `CLAUDE.md`. `--no-skills`, `--no-extensions`, `--no-mcp` and `--no-context-files` in `args` turn them off.
 
 ## Notes
 
@@ -226,6 +241,7 @@ The server passes settings through and never isolates them.
   ```json
   "docs": { "adapter": "antigravity", "args": ["--dangerously-skip-permissions"] }
   ```
+- Pi. pi never asks for approval, so every tool it has runs straight away, `bash`, `edit` and `write` included. Limit the tools in `args`, e.g. `["--tools", "read,grep,find,ls"]` for a read-only subagent.
 - Client timeouts. Codex CLI times out tool calls after 60 seconds unless `tool_timeout_sec` is set. Claude Code aborts a call after 30 minutes without progress, and the server sends progress every 60 seconds, so long turns survive.
 
 ## Development
@@ -233,7 +249,7 @@ The server passes settings through and never isolates them.
 ```bash
 npm install
 npm run build && npm run lint && npm test
-npm run test:e2e:codex       # also :claude, :grok, :opencode, :antigravity, :concurrent
+npm run test:e2e:codex       # also :claude, :grok, :opencode, :antigravity, :pi, :concurrent
 npm run check:deps           # bundled ACP adapters == verified versions
 ```
 

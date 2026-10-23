@@ -80,8 +80,10 @@ test.describe('fast: webui with MCP tools', () => {
       await expect(conversation(page).getByText('Hello world', { exact: true })).toBeVisible()
       await expect(conversation(page).getByText('Thinking')).toBeVisible()
       await expect(conversation(page).getByText('Planning the answer.')).toBeVisible()
-      expect((await pending).status).toBe('done')
-      await expect(conversation(page).getByRole('separator').filter({ hasText: /^turn \d+ · done/ })).toBeVisible()
+      const { status, turn_id: turn } = await pending
+      expect(status).toBe('done')
+      // The role prompt's turn ends done too; only this task's divider proves the turn ended
+      await expect(conversation(page).getByRole('separator').filter({ hasText: new RegExp(`^turn ${turn} · done`) })).toBeVisible()
       await expect(sessionItem(page, 'IDLE')).toBeVisible()
     })
   })

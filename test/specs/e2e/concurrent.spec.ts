@@ -1,14 +1,16 @@
-// End-to-end test of one MCP connection driving codex, claude, grok, opencode and antigravity at the same time.
+// End-to-end test of one MCP connection driving codex, claude, grok, opencode, antigravity and pi at the same time.
 // Not part of `npm test`.
 //
-// Needs codex, claude, grok, opencode and agy on PATH. Providers follow the single-agent suites and are each optional:
+// Needs codex, claude, grok, opencode, agy and pi on PATH. Providers follow the single-agent suites and are each optional:
 // COCKPIT_E2E_CODEX_CONFIG is copied into a temporary CODEX_HOME; with ANTHROPIC_BASE_URL set, claude gets a
 // temporary CLAUDE_CONFIG_DIR and the gateway variables through ${VAR}; COCKPIT_E2E_GROK_CONFIG is copied into
 // a temporary GROK_HOME, HOME points at another temporary dir and XAI_API_KEY comes through ${VAR};
 // COCKPIT_E2E_OPENCODE_CONFIG is copied to a temporary OPENCODE_CONFIG with HOME and the XDG dirs on temporary
 // dirs, the key coming from the environment. Without them the local logins are used. agy always uses the local
-// login on the real HOME, with COCKPIT_E2E_AGY_MODEL (default gemini-3.8-flash) at low effort. The tasks run no
-// tools, so approvals do not matter. No address or credential is written in this file.
+// login on the real HOME, with COCKPIT_E2E_AGY_MODEL (default gemini-3.8-flash) at low effort. COCKPIT_E2E_PI_MODELS
+// is copied into a temporary PI_CODING_AGENT_DIR with the model from COCKPIT_E2E_PI_MODEL, the key coming from the
+// environment; pi sessions always go to a temporary dir and pi runs without skills, extensions and MCP. The tasks run
+// no tools, so approvals do not matter. No address or credential is written in this file.
 import { expect, test } from '@playwright/test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -32,7 +34,9 @@ const GROK_CONFIG = process.env.COCKPIT_E2E_GROK_CONFIG
 const OPENCODE_CONFIG = process.env.COCKPIT_E2E_OPENCODE_CONFIG
 const GATEWAY = Boolean(process.env.ANTHROPIC_BASE_URL)
 const AGY_MODEL = process.env.COCKPIT_E2E_AGY_MODEL ?? 'gemini-3.8-flash'
-const VENDORS = ['codex', 'claude', 'grok', 'opencode', 'antigravity'] as const
+const PI_MODELS = process.env.COCKPIT_E2E_PI_MODELS
+const PI_MODEL = process.env.COCKPIT_E2E_PI_MODEL
+const VENDORS = ['codex', 'claude', 'grok', 'opencode', 'antigravity', 'pi'] as const
 
 type Vendor = typeof VENDORS[number]
 
@@ -47,10 +51,12 @@ async function makeEnv(): Promise<Env> {
   const root = await mkdtemp(join(tmpdir(), 'cockpit-e2e-concurrent-'))
   const dir = (name: string) => join(root, name)
   const opencodeDirs = ['opencode-home', 'xdg-config', 'xdg-data', 'xdg-state', 'xdg-cache']
-  await Promise.all(['home', 'work', 'codex-home', 'claude-config', 'grok-home', 'user-home', ...opencodeDirs].map(name => mkdir(dir(name))))
+  const piDirs = ['pi-sessions', ...(PI_MODELS ? ['pi-agent'] : [])]
+  await Promise.all(['home', 'work', 'codex-home', 'claude-config', 'grok-home', 'user-home', ...opencodeDirs, ...piDirs].map(name => mkdir(dir(name))))
   CODEX_CONFIG && await copyFile(CODEX_CONFIG, join(dir('codex-home'), 'config.toml'))
   GROK_CONFIG && await copyFile(GROK_CONFIG, join(dir('grok-home'), 'config.toml'))
   OPENCODE_CONFIG && await copyFile(OPENCODE_CONFIG, dir('opencode.json'))
+  PI_MODELS && await copyFile(PI_MODELS, join(dir('pi-agent'), 'models.json'))
   const codexEnv = CODEX_CONFIG ? { CODEX_HOME: dir('codex-home') } : {}
   const claudeEnv = GATEWAY
     ? {
@@ -71,6 +77,12 @@ async function makeEnv(): Promise<Env> {
       XDG_CACHE_HOME: dir('xdg-cache'),
     }
     : {}
+  const piEnv = {
+    PI_CODING_AGENT_SESSION_DIR: dir('pi-sessions'),
+    PI_SKIP_VERSION_CHECK: '1',
+    PI_TELEMETRY: '0',
+    ...(PI_MODELS ? { PI_CODING_AGENT_DIR: dir('pi-agent') } : {}),
+  }
   await writeFile(join(dir('home'), 'config.json'), JSON.stringify({
     idle: { timeout: 0 },
     webui: { port: 0 },
@@ -80,6 +92,7 @@ async function makeEnv(): Promise<Env> {
       grok: { adapter: 'grok', env: grokEnv },
       opencode: { adapter: 'opencode', env: opencodeEnv },
       antigravity: { adapter: 'antigravity', model: AGY_MODEL, reasoning_effort: 'low' },
+      pi: { adapter: 'pi', args: ['--no-skills', '--no-extensions', '--no-mcp'], env: piEnv, ...(PI_MODEL ? { model: PI_MODEL } : {}) },
     },
   }))
   return { root, home: dir('home'), work: dir('work') }
@@ -124,7 +137,7 @@ test.describe('concurrent e2e', () => {
     ctx.env && await rm(ctx.env.root, { recursive: true, force: true })
   })
 
-  test('E37 five subagents open concurrently on one connection, one agent process each', async () => {
+  test('E37 six subagents open concurrently on one connection, one agent process each', async () => {
     test.setTimeout(TURN_TIMEOUT)
     const replies = await Promise.all(VENDORS.map(subagent => server().call('open', { subagent, cwd: env().work })))
     replies.forEach((r, i) => {
@@ -139,12 +152,12 @@ test.describe('concurrent e2e', () => {
     assert.ok(webuis.length <= 1, children.join('\n'))
   })
 
-  test('E38 blocking prompts to all five run at the same time, each with its own reply', async () => {
+  test('E38 blocking prompts to all six run at the same time, each with its own reply', async () => {
     test.setTimeout(TURN_TIMEOUT)
     const started = Date.now()
     const pending = sessions().map((session, i) => promptIn(server(), session, task(VENDORS[i], 1)).then(reply => ({ reply, seconds: (Date.now() - started) / 1000 })))
-    // Status answers while the five blocking calls are in flight, and shows all five turns running together
-    await until(async () => (await states()).every(state => state === 'RUNNING'), 30_000, 'all five running at once')
+    // Status answers while the six blocking calls are in flight, and shows all six turns running together
+    await until(async () => (await states()).every(state => state === 'RUNNING'), 30_000, 'all six running at once')
     const calls = await Promise.all(pending)
     calls.forEach(({ reply, seconds }, i) => {
       diagnostic(`E38 ${VENDORS[i]} returned after ${seconds.toFixed(1)}s`)
@@ -157,12 +170,12 @@ test.describe('concurrent e2e', () => {
     test.setTimeout(TURN_TIMEOUT)
     const sent = await Promise.all(sessions().map((session, i) => server().call('prompt', { session, text: task(VENDORS[i], 2), wait: false })))
     sent.forEach(r => assert.equal(r.data.status, 'running', JSON.stringify(r.data)))
-    await until(async () => (await states()).every(state => state === 'IDLE'), 300_000, 'all five idle')
+    await until(async () => (await states()).every(state => state === 'IDLE'), 300_000, 'all six idle')
     const outputs = await Promise.all(sessions().map(session => server().call('output', { session })))
     outputs.forEach((r, i) => assertOwnOutput(VENDORS[i], 2, String(r.data.output)))
   })
 
-  test('E68 the webui keeps the five sessions apart, shows each one, and exits after the server', async () => {
+  test('E68 the webui keeps the six sessions apart, shows each one, and exits after the server', async () => {
     test.setTimeout(TURN_TIMEOUT)
     const activities = (ctx.stream ?? assert.fail('stream not subscribed')).of('activity')
     const messagesOf = (session: string) => activities

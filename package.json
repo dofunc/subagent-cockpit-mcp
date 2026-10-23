@@ -1,6 +1,6 @@
 {
   "name": "subagent-cockpit-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MCP server that delegates tasks to external coding agents over the Agent Client Protocol",
   "author": "yejianfei.billy",
   "license": "Apache-2.0",
@@ -41,6 +41,7 @@
     "test:e2e:grok": "npm run build && playwright test --project=e2e test/specs/e2e/grok.spec.ts",
     "test:e2e:opencode": "npm run build && playwright test --project=e2e test/specs/e2e/opencode.spec.ts",
     "test:e2e:antigravity": "npm run build && playwright test --project=e2e test/specs/e2e/antigravity.spec.ts",
+    "test:e2e:pi": "npm run build && playwright test --project=e2e test/specs/e2e/pi.spec.ts",
     "test:e2e:concurrent": "npm run build && playwright test --project=e2e test/specs/e2e/concurrent.spec.ts",
     "check:deps": "node scripts/check-deps.js"
   },
@@ -54,6 +55,7 @@
     "grok",
     "opencode",
     "antigravity",
+    "pi",
     "subagent",
     "multi-agent",
     "agent-orchestration",

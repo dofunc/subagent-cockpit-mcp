@@ -270,6 +270,13 @@ const AGY: AgentFixture = {
   session: { configOptions: [{ id: 'model', name: 'Model', type: 'select', currentValue: 'gemini-3.8-flash', options: [{ value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }, { value: 'gemini-3.8-pro', name: 'Gemini 3.8 Pro' }] }] },
 }
 
+const PI: AgentFixture = {
+  info: { name: 'pi-acp', title: 'Pi', version: '0.2.1' },
+  capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: false }, sessionCapabilities: { resume: {}, delete: {} } },
+  auth: [],
+  session: { configOptions: [{ id: 'model', name: 'Model', type: 'select', currentValue: 'anthropic/claude-sonnet-4-6', options: [{ value: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6' }] }] },
+}
+
 const SUMMARY_MARKDOWN = [
   '## Summary',
   '',
@@ -620,6 +627,7 @@ function scripts(): Script[] {
     translator(),
     crashed(),
     short('mcp-a', 'antigravity', '9e1c4f2a-agy', 'Writer', AGY, 'Draft release notes', 'closed'),
+    short('mcp-a', 'pi', '01a169f5-2eab-75a1-a0f3-e9e7dc258fcd', 'Tester', PI, 'Run the unit tests', 'closed'),
     short('mcp-a', 'codex', '019a6b11-0c2d-7e44-8b1a-5f3e9d2c1a07', 'Cleanup', CODEX, 'Remove dead feature flags', 'deleted'),
     short('mcp-b', 'codex', '019a6d40-2e7b-7f10-9c3d-8a1b5e6f2c94', 'Coder', CODEX, 'Fix the navbar overflow', 'shutdown'),
     short('mcp-b', 'claude', '5e2a7c1d-9b4f-4e63-a8d0-1f7c3b9e6a25', 'Reviewer', CLAUDE, 'Review the navbar fix', 'exited'),

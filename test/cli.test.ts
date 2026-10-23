@@ -35,7 +35,7 @@ describe('command line', () => {
       const client = new Client({ name: 'test', version: '1' })
       try {
         await client.connect(new StdioClientTransport({ command: process.execPath, args: [DIST_CLI, ...args], env: { PATH: process.env.PATH ?? '', SUBAGENT_COCKPIT_HOME: home, SUBAGENT_COCKPIT_WEBUI_PORT: '0' }, stderr: 'pipe' }))
-        assert.equal((await client.listTools()).tools.length, 16)
+        assert.equal((await client.listTools()).tools.length, 17)
       } finally {
         await client.close()
       }
@@ -109,19 +109,24 @@ describe('standalone package', () => {
     await writeFile(fake, '#!/bin/sh\necho "2.1.292 (Claude Code)"\n')
     await chmod(fake, 0o755)
     const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } } }
-    const [claude, codex, agy] = await Promise.all([
+    const [claude, codex, agy, pi] = await Promise.all([
       runBundled(dist, 'claude-agent-acp.js', { CLAUDE_CODE_EXECUTABLE: fake }, initialize, 4000),
       runBundled(dist, 'codex-acp.js', { CODEX_PATH: join(root, 'no-such-codex') }, null, 2000),
       runBundled(dist, 'agy-acp.js', { AGY_PATH: join(root, 'no-such-agy') }, initialize, 2000),
+      runBundled(dist, 'pi-acp.js', { PI_PATH: join(root, 'no-such-pi') }, initialize, 2000),
     ])
     const replyOf = (stdout: string) => stdout.split('\n').filter(Boolean).map(l => JSON.parse(l)).find(m => m.id === 1)
     assert.equal(replyOf(claude.stdout)?.result?.agentCapabilities?.loadSession, true)
     const agyCapabilities = replyOf(agy.stdout)?.result?.agentCapabilities
     assert.deepEqual(agyCapabilities?.sessionCapabilities?.resume, {})
     assert.equal(agyCapabilities?.loadSession, undefined)
+    const piCapabilities = replyOf(pi.stdout)?.result?.agentCapabilities
+    assert.equal(piCapabilities?.loadSession, true)
+    assert.deepEqual(piCapabilities?.sessionCapabilities, { resume: {}, delete: {} })
     assert.doesNotMatch(claude.stderr, MODULE_ERROR)
     assert.doesNotMatch(codex.stderr, MODULE_ERROR)
     assert.doesNotMatch(agy.stderr, MODULE_ERROR)
+    assert.doesNotMatch(pi.stderr, MODULE_ERROR)
     const source = fileURLToPath(new URL('../node_modules/@agentclientprotocol/codex-acp/dist/index.js', import.meta.url))
     assert.ok((await readFile(join(dist, 'codex-acp.js'))).equals(await readFile(source)))
   }))
