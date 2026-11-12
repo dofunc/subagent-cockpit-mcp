@@ -1,7 +1,9 @@
-import type { CSSProperties, ReactNode } from 'react'
-import { Alert, Flex, Tag, theme, Typography } from 'antd'
-import { ApartmentOutlined, CloseCircleOutlined, ExclamationCircleOutlined, FileTextOutlined, InfoCircleOutlined, ScissorOutlined, SettingOutlined, ShrinkOutlined, ThunderboltOutlined } from '@ant-design/icons'
+import { useEffect, useRef, useState } from 'react'
+import type { CSSProperties, ReactNode, UIEvent } from 'react'
+import { Alert, Button, Divider, Flex, Tag, theme, Typography } from 'antd'
+import { ApartmentOutlined, ArrowDownOutlined, CloseCircleOutlined, ExclamationCircleOutlined, FileTextOutlined, InfoCircleOutlined, ScissorOutlined, SettingOutlined, ShrinkOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { Bubble, Think } from '@ant-design/x'
+import type { GetRef } from 'antd'
 import type { BubbleItemType, BubbleListProps } from '@ant-design/x'
 import type { ConversationItem, Conversation, JsonObject } from '../../../types'
 import { isObject } from '../../transcript'
@@ -27,6 +29,9 @@ const FULL_WIDTH = { body: { width: '100%' }, content: { width: '100%' } }
 
 /** A system bubble centers its content in a row; a column stretches cards and event lines to the full width instead. */
 const SYSTEM_WIDTH: { body: CSSProperties; content: CSSProperties } = { body: { width: '100%' }, content: { width: '100%', flexDirection: 'column', alignItems: 'stretch' } }
+
+/** How far above the bottom, in px, the list counts as scrolled up */
+const AWAY_FROM_BOTTOM = 48
 
 /** Fields a raw item's header line already shows */
 const HEADER_FIELDS = new Set(['direction', 'jsonrpc', 'method', 'id', 'sessionUpdate', 'sessionId'])
@@ -79,6 +84,56 @@ function turnSummary({ turn_id, data }: ConversationItem, t: Translate): string 
     context.size === undefined ? '' : t('turnContext', { used: tokenCount(Number(context.used)), size: tokenCount(Number(context.size)) }),
     text(data.error),
   ].filter(Boolean).join(' · ')
+}
+
+interface RunningTurnProps {
+  prompt: ConversationItem
+  /** The divider of the turn before it, if any */
+  previous: ConversationItem | undefined
+  /** The latest usage_update */
+  live: JsonObject
+}
+
+/**
+ * The running turn's line, in the divider's order: turn, running, time so far (ticking each second), tokens, cache
+ * and context. Tokens and cache only come with a turn's result, so they are the previous turn's; the context is the
+ * latest usage_update's, else the previous turn's too.
+ */
+function RunningTurn({ prompt, previous, live }: RunningTurnProps) {
+  const { t } = usePreferences()
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+  const usage = obj(previous?.data.usage)
+  const rate = cacheRate(usage)
+  const context = typeof live.size === 'number' && live.size > 0 ? live : obj(previous?.data.context)
+  const line = [
+    t('turn', { id: prompt.turn_id ?? '?' }),
+    t('turnRunning'),
+    duration(Math.floor(Math.max(0, now - prompt.at) / 1000) * 1000),
+    usage.totalTokens === undefined || usage.totalTokens === null ? '' : t('tokens', { count: tokenCount(Number(usage.totalTokens)) }),
+    rate === undefined ? '' : t('cacheHit', { rate: String(rate) }),
+    context.size === undefined ? '' : t('turnContext', { used: tokenCount(Number(context.used)), size: tokenCount(Number(context.size)) }),
+  ].filter(Boolean).join(' · ')
+  // Drawn like the finished turn's divider; markdown.css colors the text and sweeps a light through it
+  return (
+    <Divider style={{ margin: '12px 0' }}>
+      <Flex component="span" className="cockpit-turn-line-sweep">{line}</Flex>
+    </Divider>
+  )
+}
+
+/**
+ * The running turn, pinned under the list; gone once the turn ends and its divider shows the totals. The latest
+ * prompt with no divider after it is the running turn; a closed session always ends its turn with a divider.
+ */
+function TurnLine({ session }: { session: Conversation }) {
+  const latest = session.items.findLast(item => item.kind === 'prompt' || item.kind === 'turn')
+  if (latest?.kind !== 'prompt' || session.closed !== null) return null
+  const previous = session.items.findLast(item => item.kind === 'turn')
+  return <RunningTurn prompt={latest} previous={previous} live={obj(session.info.usage)} />
 }
 
 interface EventLineProps {
@@ -266,10 +321,34 @@ export default function Transcript({ session }: { session: Conversation }) {
   // turn_started opens the prompt item just before session/prompt fills it; an empty bubble would flash
   const shown = session.items.filter(item => item.kind !== 'prompt' || item.data.prompt !== undefined)
   const items = shown.map((item, index) => toBubble(session, item, index === shown.length - 1, t))
+  // @ant-design/x does not export BubbleListRef from its root
+  const listRef = useRef<GetRef<typeof Bubble.List>>(null)
+  const [away, setAway] = useState(false)
+  useEffect(() => setAway(false), [session.mcp_id, session.session])
+
+  // The list scrolls in reverse (autoScroll), so scrollTop is 0 at the bottom and negative above it
+  const handleScroll = (event: UIEvent<HTMLDivElement>) => setAway(Math.abs(event.currentTarget.scrollTop) > AWAY_FROM_BOTTOM)
+  const handleBottom = () => listRef.current?.scrollTo({ top: 'bottom', behavior: 'smooth' })
+
   // The tab's font is a CSS variable (markdown.css); antd components take it as their font token
   return (
     <Compact font="var(--cockpit-conversation-font)">
-      <Bubble.List className="cockpit-conversation" style={{ height: '100%' }} role={ROLES} items={items} />
+      <Flex vertical className="cockpit-conversation" style={{ height: '100%' }}>
+        <Flex vertical style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+          <Bubble.List ref={listRef} style={{ height: '100%' }} role={ROLES} items={items} onScroll={handleScroll} />
+          {away && (
+            <Button
+              shape="round"
+              icon={<ArrowDownOutlined />}
+              style={{ position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 1 }}
+              onClick={handleBottom}
+            >
+              {t('backToBottom')}
+            </Button>
+          )}
+        </Flex>
+        <TurnLine session={session} />
+      </Flex>
     </Compact>
   )
 }

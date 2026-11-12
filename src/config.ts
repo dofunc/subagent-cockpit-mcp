@@ -49,9 +49,14 @@ interface RawConfig {
   subagents?: Record<string, RawEntry<Partial<SubagentConfig>>>
 }
 
-/** Home dir: SUBAGENT_COCKPIT_HOME, else ~/.subagent-cockpit. */
-export function resolveHome(host: Host): string {
-  return host.env.get('SUBAGENT_COCKPIT_HOME') || host.store.join(host.env.homeDir(), '.subagent-cockpit')
+/** Home dir: --home, else SUBAGENT_COCKPIT_HOME, else ~/.subagent-cockpit. */
+export function resolveHome(host: Host, option?: string): string {
+  return option || host.env.get('SUBAGENT_COCKPIT_HOME') || host.store.join(host.env.homeDir(), '.subagent-cockpit')
+}
+
+/** A config file asked for: --config, else SUBAGENT_COCKPIT_CONFIG; undefined means <home>/config.json. */
+export function resolveConfigFile(host: Host, option?: string): string | undefined {
+  return option || host.env.get('SUBAGENT_COCKPIT_CONFIG') || undefined
 }
 
 /** Replace ${VAR} in every string of the value with the host env value. Undefined variables become ''. */
@@ -97,13 +102,15 @@ function limits(raw: RawLimits | undefined, section: string): typeof LIMITS {
 }
 
 /**
- * Load <home>/config.json, creating it with defaults on first run. The first file leaves the message limits
- * out to stay short; they take their defaults. Entries are kept as written (env values resolved to strings);
- * resolveSubagent() applies profiles and defaults. Unknown fields are ignored. Throws on a limit that is not a
- * positive integer.
+ * Load the config: `file` when one was asked for, else <home>/config.json. Only the default file is created
+ * with defaults on first run; a file asked for must exist. The first file leaves the message limits out to stay
+ * short; they take their defaults. Entries are kept as written (env values resolved to strings);
+ * resolveSubagent() applies profiles and defaults. Unknown fields are ignored. Throws on a missing file asked
+ * for and on a limit that is not a positive integer.
  */
-export async function loadConfig(host: Host, home: string): Promise<AppConfig> {
-  const path = host.store.join(home, 'config.json')
+export async function loadConfig(host: Host, home: string, file?: string): Promise<AppConfig> {
+  const path = file ?? host.store.join(home, 'config.json')
+  if (file !== undefined && !await host.store.exists(file)) throw new Error(`config file not found: ${file}`)
   if (!await host.store.exists(path)) {
     const { idle, webui, profiles, subagents } = DEFAULT_CONFIG
     await host.store.mkdir(home)

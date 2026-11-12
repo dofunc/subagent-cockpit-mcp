@@ -1,6 +1,6 @@
 // Fake agy for the bridge tests. `--version` prints 1.4.2, `models` prints the scripted ids, anything else runs
 // print mode: answers stdin `user` events per FAKE_AGY_SCRIPT and logs argv, inputs and signals to FAKE_AGY_LOG.
-import { appendFileSync, readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 
@@ -9,6 +9,11 @@ export interface FakeTurn {
   match: string
   /** Lines printed to stdout as is before the steps */
   raw?: string[]
+  /**
+   * step_update payloads, in order. Two kinds are acted on instead of printed: `{ write: { path, text } }` writes a
+   * file (as agy's write_file and edit_file do between their ACTIVE and DONE steps), `{ sleep: ms }` waits.
+   * `__CWD__` anywhere in a step stands for agy's working directory.
+   */
   steps?: Array<Record<string, unknown>>
   result?: Record<string, unknown>
   /** Wait for SIGINT instead of finishing; on SIGINT emit result ERROR `interrupted`, then exit 1 after 300ms */
@@ -103,7 +108,12 @@ async function printMode(argv: string[], script: FakeAgyScript, log: (event: str
     state.running = true
     turn?.raw?.forEach(line => process.stdout.write(`${line}\n`))
     const steps = turn ? turn.steps ?? [] : [{ step_index: 1, state: 'ACTIVE', step_type: 'agent_response', text_delta: 'ok' }]
-    steps.forEach(step => emit({ event: 'step_update', step_update: step }))
+    for (const raw of steps) {
+      const step = JSON.parse(JSON.stringify(raw).replaceAll('__CWD__', process.cwd()))
+      if (step.write) writeFileSync(step.write.path, step.write.text)
+      else if (typeof step.sleep === 'number') await sleep(step.sleep)
+      else emit({ event: 'step_update', step_update: step })
+    }
     if (turn?.crash) exit(3)
     if (turn?.hang) {
       state.hanging = turn

@@ -170,6 +170,22 @@ describe('config', () => {
       await rm(home, { recursive: true, force: true })
     }
   })
+
+  test('U315 a config file asked for is read as is, and a missing one fails without creating anything', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cockpit-config-'))
+    try {
+      const [home, file] = [join(root, 'home'), join(root, 'c.json')]
+      await assert.rejects(loadConfig(new NodeHost(), home, file), { message: `config file not found: ${file}` })
+      assert.deepEqual(await readdir(root), [])
+      await writeFile(file, JSON.stringify({ idle: { timeout: 30 }, subagents: { 'from-file': { adapter: 'codex' } } }))
+      const config = await loadConfig(new NodeHost(), home, file)
+      assert.deepEqual(Object.keys(config.subagents), ['from-file'])
+      assert.deepEqual(config.idle, { timeout: 30 })
+      assert.equal(await exists(join(home, 'config.json')), false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('open', () => {

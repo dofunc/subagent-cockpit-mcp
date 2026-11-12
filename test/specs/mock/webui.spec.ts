@@ -460,4 +460,50 @@ test.describe('mock: webui page', () => {
     const divider = panel.getByRole('separator').filter({ hasText: '1m 23s' }).locator('.ant-divider-inner-text')
     expect(await look(divider)).toEqual(await look(panel.locator('.x-markdown p').filter({ hasText: 'The dates are in order.' })))
   })
+
+  test('W15 a running turn keeps a line under the list: time so far, the last turn\'s tokens and cache, the latest context', async ({ page }) => {
+    await openPage(page)
+    const panel = tab(page, 'Conversation')
+    const line = panel.locator('.cockpit-turn-line-sweep')
+    // Planner and Releaser never sent a usage_update; Reviewer's context is its latest one
+    const running: Array<[string, RegExp]> = [
+      ['Plan the migration', /· 10\.8K tokens · cache 80%$/],
+      ['Fix auth middleware', /· 8\.9K tokens · cache 80% · context 61K \/ 200K$/],
+      ['Set up the release', /· 12\.6K tokens · cache 80%$/],
+    ]
+    for (const [name, ending] of running) {
+      await pick(page, name)
+      await expect(line).toHaveText(/^turn \d+ · running · \d+m \d+s · /)
+      await expect(line).toHaveText(ending)
+    }
+    const before = await line.innerText()
+    await expect.poll(() => line.innerText(), { timeout: 3000 }).not.toBe(before)
+
+    // Drawn like the dividers in the list
+    const look = (locator: Locator) => locator.first().evaluate(el => [getComputedStyle(el).fontFamily, getComputedStyle(el).fontSize, getComputedStyle(el).fontWeight])
+    const own = panel.locator('.ant-divider-inner-text:has(.cockpit-turn-line-sweep)')
+    expect(await look(own)).toEqual(await look(panel.getByRole('separator').first().locator('.ant-divider-inner-text')))
+
+    // A finished turn leaves its totals to the divider in the list
+    await pick(page, 'Tidy the changelog entries')
+    await expect(panel.getByRole('separator').last()).toHaveText(/^turn \d+ · done/)
+    await expect(line).toHaveCount(0)
+  })
+
+  test('W16 scrolled up, a button takes the conversation back to the bottom', async ({ page }) => {
+    await openPage(page)
+    await pick(page, 'Add input validation')
+    const panel = tab(page, 'Conversation')
+    const button = panel.getByRole('button', { name: /Back to bottom/ })
+    const list = panel.locator('.ant-bubble-list-scroll-box')
+    await expect(panel.getByText('All 48 tests pass.').last()).toBeVisible()
+    await expect(button).toHaveCount(0)
+
+    await list.hover()
+    await page.mouse.wheel(0, -800)
+    await expect(button).toBeVisible()
+    await button.click()
+    await expect(button).toHaveCount(0)
+    expect(Math.abs(await list.evaluate(el => el.scrollTop))).toBeLessThanOrEqual(48)
+  })
 })

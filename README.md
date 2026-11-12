@@ -18,7 +18,7 @@ Let the agent you already use (Claude Code, Codex CLI, Cursor, any MCP client) h
 
 ## Web UI
 
-Open `http://127.0.0.1:7200` to watch the sessions: replies as they stream, tool calls with their diffs, plans, approvals and questions, plus a protocol log of every raw ACP message.
+Open `http://127.0.0.1:7200` to watch the sessions: replies as they stream, tool calls with their diffs, plans, approvals and questions, plus a protocol log of every raw ACP message. A running turn shows how long it has run and its latest usage under the conversation, and a button takes you back to the bottom after you scroll up.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/webui-dark.webp">
@@ -128,7 +128,7 @@ Verified with codex 0.162.1, claude 2.1.292, grok 1.0.46, opencode 2.0.30, agy 1
 
 `types` keeps and `exclude_types` drops item kinds (`prompt`, `message`, `thought`, `tool`, `plan`, `turn` and the rest), `last` takes the last few, and `since` with the `seq` and `server_id` of the previous call returns only what changed. `reset: true` means start over from the items returned.
 
-A UI client that polls passes `simplify: true`. Tool calls then come with their title, status and paths only, and each session without its slash commands. It fetches the rest of one item when the person opens it:
+A UI client that polls passes `simplify: true`. Tool calls then come with their title, status and paths only, each config option with its current choice only, and each session without its slash commands. It fetches the rest of one item when the person opens it:
 
 ```json
 { "simplify": true, "since": 1287, "server_id": "f3c1…" }
@@ -161,7 +161,20 @@ The second line is the `item` call. An item that is no longer kept fails with `I
 }
 ```
 
-A `subagents` object you write replaces the default entries as a whole. `idle.timeout` closes sessions idle that many seconds. The default `0` never closes them, since the server and its agents exit with your MCP client anyway. A session closed this way comes back by itself on the next `prompt` or `set_config`, settings included; `status` meanwhile reports it `CLOSED`. `webui.port` is the [Web UI](#web-ui) port, `0` for none. `SUBAGENT_COCKPIT_HOME` moves the whole `~/.subagent-cockpit` directory.
+A `subagents` object you write replaces the default entries as a whole. `idle.timeout` closes sessions idle that many seconds. The default `0` never closes them, since the server and its agents exit with your MCP client anyway. A session closed this way comes back by itself on the next `prompt` or `set_config`, settings included; `status` meanwhile reports it `CLOSED`. `webui.port` is the [Web UI](#web-ui) port, `0` for none.
+
+To run on another config, for a test or a demo, point the server elsewhere. The command line wins over the environment, relative paths are from the working directory, and both options go before or after `mcp`:
+
+| | Option | Environment | Default |
+|---|---|---|---|
+| Config file | `-c, --config <file>` | `SUBAGENT_COCKPIT_CONFIG` | `<home>/config.json` |
+| Home (config and sessions) | `--home <dir>` | `SUBAGENT_COCKPIT_HOME` | `~/.subagent-cockpit` |
+
+```bash
+npx -y subagent-cockpit-mcp -c ./demo/config.json
+```
+
+A config file you name must exist; the server stops with `config file not found` otherwise. Only `<home>/config.json` is created with defaults when missing. Sessions stay in `<home>/sessions/` either way.
 
 The Web UI and `snapshot` keep the latest 5000 ACP messages per session, and show any message over 1 MB (1048576 bytes) as a truncation marker. Each has its own setting, in bytes and counts:
 
@@ -217,6 +230,19 @@ The server never logs in and never stores credentials. Each agent uses its own l
 
 - Claude Code: `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` with `ANTHROPIC_AUTH_TOKEN`. `CLAUDE_CONFIG_DIR` gives a subagent its own config directory.
 - Codex: a custom provider goes in the `config.toml` of a separate `CODEX_HOME`, with its key in `env`, e.g. `{ "CODEX_HOME": "/path/to/codex-home", "OPENAI_API_KEY": "${MY_KEY}" }`. `DEFAULT_AUTH_REQUEST` makes codex-acp log in by itself and save the key in `CODEX_HOME/auth.json`.
+
+  ```toml
+  # /path/to/codex-home/config.toml
+  model_provider = "my-gateway"
+
+  [model_providers.my-gateway]
+  name = "My gateway"
+  base_url = "https://gateway.example.com/v1"
+  env_key = "OPENAI_API_KEY"
+  wire_api = "responses"
+  ```
+
+  It has to be this file. From codex 0.166.0 (still so in 0.167.0) codex checks on every turn that the chat's provider is the one in `config.toml`, and codex-acp hands `CODEX_CONFIG` and `MODEL_PROVIDER` to the new chat only. A provider set through those two alone fails every prompt with `This chat uses <id>, but your current provider is openai`.
 - Grok: a custom endpoint goes in the `config.toml` of a separate `GROK_HOME`, with `XAI_API_KEY` in `env`.
 - OpenCode: point `OPENCODE_CONFIG` at a config whose `providers.openai.settings` sets `baseURL` and `apiKey` (`{env:VAR}`). Add `"transport": "http"` if the gateway has no WebSocket.
 - Antigravity: signs in only from its own terminal UI. For a second account, set `HOME` in `env` and run `HOME=/path/to/home agy` once.

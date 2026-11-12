@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcessByStdio } from 'node:child_process'
+import { readFileSync, statSync } from 'node:fs'
+import { isAbsolute, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { Readable, Writable } from 'node:stream'
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
@@ -66,15 +68,34 @@ const MODES = ['default', 'accept-edits', 'plan', 'auto']
 const TOOL_KINDS: Array<[RegExp, acp.ToolKind]> = [
   [/^(run_command|send_command_input|command_status)$/, 'execute'],
   [/^(read_file|view_file|list_dir|read_resource)$/, 'read'],
-  [/^(write_to_file|replace_file_content|multi_replace_file_content|sed_file|notebook_edit)$/, 'edit'],
+  [/^(write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|sed_file|notebook_edit)$/, 'edit'],
   [/^(grep_search|find_by_name|search_web)$/, 'search'],
   [/^(read_url_content|open_browser_url|browser_.+)$/, 'fetch'],
 ]
 const AGY = process.env.AGY_PATH ?? 'agy'
 const USER_ARGS = process.argv.slice(2)
+/** Files the bridge reads around an edit for its diff, at most */
+const DIFF_FILE_BYTES = 1024 * 1024
+/** Where agy names the file an edit tool writes, first string wins */
+const PATH_PARAMETERS = ['Path', 'AbsolutePath', 'TargetFile']
 
 function log(message: string): void {
   process.stderr.write(`[agy-acp] ${message}\n`)
+}
+
+/**
+ * A file's text for an edit's diff: null when it does not exist (a new file), undefined when it cannot serve (over
+ * DIFF_FILE_BYTES, not a file, unreadable). Read synchronously, to get there before agy writes.
+ */
+function readSnapshot(path: string): string | null | undefined {
+  try {
+    const stat = statSync(path, { throwIfNoEntry: false })
+    if (!stat) return null
+    return stat.isFile() && stat.size <= DIFF_FILE_BYTES ? readFileSync(path, 'utf-8') : undefined
+  } catch (err) {
+    log(`cannot read ${path} for a diff: ${err instanceof Error ? err.message : String(err)}`)
+    return undefined
+  }
 }
 
 /** Parse one stdout line; undefined for anything that is not a known agy event (logged to stderr). */
@@ -250,6 +271,8 @@ class AgyAgent implements acp.Agent {
   private settings: Settings = { model: 'default', reasoning_effort: 'default', mode: 'default' }
   private models = new Map<string, string[]>()
   private agy?: AgyProcess
+  /** Edit tools in flight: the file and its text before agy wrote it, by toolCallId */
+  private edits = new Map<string, { path: string; oldText: string | null }>()
   private cancelling = false
   /** Set by shutdown(); no agy is started after it */
   private closed = false
@@ -308,7 +331,7 @@ class AgyAgent implements acp.Agent {
     }
     const agy = this.agy
     if (!agy) throw RequestError.internalError(undefined, 'agy is not running')
-    const result = await agy.turn(text, step => this.forward(step))
+    const result = await agy.turn(text, step => this.forward(step)).finally(() => this.edits.clear())
     if (this.cancelling) {
       // agy exits after an interrupt; never hand it the next turn
       await agy.stop()
@@ -373,26 +396,47 @@ class AgyAgent implements acp.Agent {
       .catch((err: Error) => log(`session/update failed: ${err.message}`))
   }
 
+  /**
+   * One agy step as a session/update. agy says only which file an edit tool writes, so the bridge reads the file
+   * when the step starts and again when it is done, and sends the change as an ACP diff (none when either read
+   * cannot serve or nothing changed).
+   */
   private toUpdate({ step_index, state, step_type, text_delta, tool_name, tool_info }: AgyStep): acp.SessionUpdate | undefined {
     if (step_type === 'agent_response' && text_delta) {
       return { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: text_delta }, messageId: String(step_index) }
     }
     if (step_type !== 'tool') return undefined
     const toolCallId = `step-${step_index}`
-    if (state === 'DONE') return { sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', rawOutput: { output: tool_info?.output ?? null } }
+    const edit = this.edits.get(toolCallId)
+    if (state === 'DONE' || state === 'ERROR') this.edits.delete(toolCallId)
+    if (state === 'DONE') {
+      const newText = edit ? readSnapshot(edit.path) : undefined
+      const diff: acp.ToolCallContent[] = edit && typeof newText === 'string' && newText !== edit.oldText
+        ? [{ type: 'diff', path: edit.path, oldText: edit.oldText, newText }]
+        : []
+      return { sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', rawOutput: { output: tool_info?.output ?? null }, ...(diff.length > 0 ? { content: diff } : {}) }
+    }
     if (state === 'ERROR') {
       const text = tool_info?.error?.message ?? 'tool failed'
       return { sessionUpdate: 'tool_call_update', toolCallId, status: 'failed', content: [{ type: 'content', content: { type: 'text', text } }] }
     }
     const name = tool_name ?? 'tool'
-    const target = Object.values(tool_info?.parameters ?? {}).find((v): v is string => typeof v === 'string')
+    const parameters = tool_info?.parameters ?? {}
+    const target = Object.values(parameters).find((v): v is string => typeof v === 'string')
+    const kind = TOOL_KINDS.find(([pattern]) => pattern.test(name))?.[1] ?? 'other'
+    const file = PATH_PARAMETERS.map(key => parameters[key]).find((v): v is string => typeof v === 'string' && v !== '')
+    if (kind === 'edit' && file && !edit) {
+      const path = isAbsolute(file) ? file : resolve(this.cwd, file)
+      const oldText = readSnapshot(path)
+      oldText !== undefined && this.edits.set(toolCallId, { path, oldText })
+    }
     return {
       sessionUpdate: 'tool_call',
       toolCallId,
       title: target ? `${name} ${target.slice(0, 120)}` : name,
-      kind: TOOL_KINDS.find(([pattern]) => pattern.test(name))?.[1] ?? 'other',
+      kind,
       status: 'in_progress',
-      rawInput: tool_info?.parameters ?? {},
+      rawInput: parameters,
     }
   }
 

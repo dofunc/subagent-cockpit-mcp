@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { Command, Option } from 'commander'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import './adapter/codex-adapter'
@@ -6,7 +7,7 @@ import './adapter/grok-adapter'
 import './adapter/opencode-adapter'
 import './adapter/antigravity-adapter'
 import './adapter/pi-adapter'
-import { loadConfig, resolveHome } from './config'
+import { loadConfig, resolveConfigFile, resolveHome } from './config'
 import { ConversationStore } from './conversation-store'
 import type { Host } from './host/host'
 import { NodeHost } from './host/node-host'
@@ -32,11 +33,18 @@ function webuiPort(host: Host, config: AppConfig): number {
   return 0
 }
 
+/** The global options that place the config and the home dir; relative paths are from the process's cwd. */
+interface PathOptions {
+  home?: string
+  config?: string
+}
+
 /** Run the MCP server over stdio. stdout carries protocol messages only; logs go to stderr. */
-async function runMcp(): Promise<void> {
+async function runMcp(options: PathOptions): Promise<void> {
   const host = new NodeHost()
-  const home = resolveHome(host)
-  const config = await loadConfig(host, home)
+  const home = resolve(resolveHome(host, options.home))
+  const file = resolveConfigFile(host, options.config)
+  const config = await loadConfig(host, home, file && resolve(file))
   const manager = new SessionManager(host, config, home)
   const store = new ConversationStore(manager, config.snapshot, host)
   const server = createServer(manager, store, VERSION)
@@ -67,12 +75,14 @@ const program = new Command()
   .name('subagent-cockpit-mcp')
   .version(VERSION)
   .description('MCP server that delegates tasks to external coding agents over ACP')
+  .option('--home <dir>', 'Home directory for the config and sessions (env SUBAGENT_COCKPIT_HOME)')
+  .option('-c, --config <file>', 'Config file, instead of <home>/config.json (env SUBAGENT_COCKPIT_CONFIG)')
 
 program
   .command('mcp', { isDefault: true })
   .description('Run the MCP server (default command)')
   .addOption(new Option('--transport <type>', 'Transport').choices(['stdio']).default('stdio'))
-  .action(runMcp)
+  .action(() => runMcp(program.opts<PathOptions>()))
 
 program.parseAsync().catch((err: Error) => {
   process.stderr.write(`subagent-cockpit-mcp: ${err.message}\n`)

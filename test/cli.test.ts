@@ -1,9 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmod, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -49,7 +49,7 @@ describe('command line', () => {
     assert.equal(r.stdout, '')
   }))
 
-  for (const args of [['daemon', 'start'], ['open'], ['foo'], ['mcp', 'extra'], ['mcp', '--unknown'], ['mcp', '--port', '7200'], ['--home', '/tmp/x']]) {
+  for (const args of [['daemon', 'start'], ['open'], ['foo'], ['mcp', 'extra'], ['mcp', '--unknown'], ['mcp', '--port', '7200'], ['--home'], ['-c'], ['mcp', '--config']]) {
     test(`U92 "${args.join(' ')}" fails without starting the server`, () => withHome(async home => {
       const r = run(args, home)
       assert.notEqual(r.status, 0)
@@ -81,6 +81,110 @@ describe('command line', () => {
     assert.equal(lines.length, 2)
     lines.forEach(line => assert.equal(JSON.parse(line).jsonrpc, '2.0'))
     assert.match(out.stderr, /Created default config/)
+  }))
+})
+
+/** A config file whose only subagent is `name`, so the subagents listing tells which file the server read. */
+async function writeConfig(path: string, name: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, JSON.stringify({ subagents: { [name]: { adapter: 'codex' } } }))
+}
+
+/** A closed session on disk under `home`, so the sessions listing tells which home the server uses. */
+async function storeSession(home: string, id: string): Promise<void> {
+  const dir = join(home, 'sessions', id)
+  const at = new Date().toISOString()
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'session.json'), JSON.stringify({ subagent: 'from-file', cwd: home, role: '', created_at: at, last_prompt: '', last_at: at }))
+}
+
+interface Listing {
+  subagents: string[]
+  sessions: string[]
+}
+
+/** Start the built server with `args` and `env` (PATH and the webui off added), list its subagents and sessions. */
+async function list(args: string[], env: Record<string, string>, cwd?: string): Promise<Listing> {
+  const client = new Client({ name: 'test', version: '1' })
+  try {
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [DIST_CLI, ...args], env: { PATH: process.env.PATH ?? '', SUBAGENT_COCKPIT_WEBUI_PORT: '0', ...env }, cwd, stderr: 'pipe' }))
+    const subagents: { subagents: Array<{ name: string }> } = JSON.parse(JSON.stringify((await client.callTool({ name: 'subagents', arguments: {} })).structuredContent))
+    const sessions: { sessions: Array<{ session: string }> } = JSON.parse(JSON.stringify((await client.callTool({ name: 'sessions', arguments: {} })).structuredContent))
+    return { subagents: subagents.subagents.map(s => s.name), sessions: sessions.sessions.map(s => s.session) }
+  } finally {
+    await client.close()
+  }
+}
+
+/** Run the built server to its exit with `args`, `env` (PATH and the webui off added) and `cwd`. */
+function runIn(args: string[], env: Record<string, string>, cwd?: string) {
+  return spawnSync(process.execPath, [DIST_CLI, ...args], {
+    env: { PATH: process.env.PATH ?? '', SUBAGENT_COCKPIT_WEBUI_PORT: '0', ...env },
+    cwd,
+    input: '',
+    encoding: 'utf-8',
+    timeout: 10_000,
+  })
+}
+
+const exists = (path: string) => readFile(path).then(() => true, () => false)
+
+describe('config file and home options', () => {
+  test('U309 --home wins over SUBAGENT_COCKPIT_HOME and gets the default config', () => withHome(async root => {
+    const [chosen, other] = [join(root, 'chosen'), join(root, 'other')]
+    await mkdir(other)
+    const { subagents } = await list(['--home', chosen], { SUBAGENT_COCKPIT_HOME: other })
+    assert.deepEqual(subagents, ['codex', 'claude', 'grok', 'opencode', 'antigravity', 'pi'])
+    assert.equal(await exists(join(chosen, 'config.json')), true)
+    assert.deepEqual(await readdir(other), [])
+  }))
+
+  for (const form of [['-c', 'F'], ['--config', 'F'], ['--config=F'], ['mcp', '-c', 'F']]) {
+    test(`U310 "${form.join(' ')}" reads that file and leaves the home without a config`, () => withHome(async root => {
+      const [file, home] = [join(root, 'conf', 'c.json'), join(root, 'home')]
+      await writeConfig(file, 'from-file')
+      const { subagents } = await list(form.map(arg => arg.replace(/F$/, file)), { SUBAGENT_COCKPIT_HOME: home })
+      assert.deepEqual(subagents, ['from-file'])
+      assert.equal(await exists(join(home, 'config.json')), false)
+    }))
+  }
+
+  test('U311 SUBAGENT_COCKPIT_CONFIG picks the file, --config wins over it', () => withHome(async root => {
+    const [fromEnv, fromFile, home] = [join(root, 'env.json'), join(root, 'file.json'), join(root, 'home')]
+    await writeConfig(fromEnv, 'from-env')
+    await writeConfig(fromFile, 'from-file')
+    const env = { SUBAGENT_COCKPIT_HOME: home, SUBAGENT_COCKPIT_CONFIG: fromEnv }
+    assert.deepEqual((await list([], env)).subagents, ['from-env'])
+    assert.deepEqual((await list(['-c', fromFile], env)).subagents, ['from-file'])
+  }))
+
+  test('U312 a config file asked for that does not exist fails the start, creating nothing', () => withHome(async root => {
+    const [missing, home] = [join(root, 'confg.json'), join(root, 'home')]
+    const asked: Array<{ args: string[]; env: Record<string, string> }> = [{ args: ['-c', missing], env: {} }, { args: [], env: { SUBAGENT_COCKPIT_CONFIG: missing } }]
+    for (const { args, env } of asked) {
+      const r = runIn(args, { SUBAGENT_COCKPIT_HOME: home, ...env })
+      assert.equal(r.status, 1)
+      assert.equal(r.stdout, '')
+      assert.equal(r.stderr, `subagent-cockpit-mcp: config file not found: ${missing}\n`)
+    }
+    assert.deepEqual(await readdir(root), [])
+  }))
+
+  test('U313 relative --config and --home are from the working directory', () => withHome(async root => {
+    const cwd = await realpath(root)
+    await writeConfig(join(cwd, 'conf', 'c.json'), 'from-file')
+    await storeSession(join(cwd, 'h'), 'codex_stored-1')
+    assert.deepEqual(await list(['-c', 'conf/c.json', '--home', 'h'], {}, cwd), { subagents: ['from-file'], sessions: ['codex_stored-1'] })
+    const r = runIn(['-c', 'nope.json', '--home', 'h'], {}, cwd)
+    assert.equal(r.stderr, `subagent-cockpit-mcp: config file not found: ${join(cwd, 'nope.json')}\n`)
+  }))
+
+  test('U314 --home and --config together: the config from the file, the sessions from the home', () => withHome(async root => {
+    const [file, home] = [join(root, 'c.json'), join(root, 'home')]
+    await writeConfig(file, 'from-file')
+    await storeSession(home, 'codex_stored-1')
+    assert.deepEqual(await list(['--home', home, '-c', file], {}), { subagents: ['from-file'], sessions: ['codex_stored-1'] })
+    assert.equal(await exists(join(home, 'config.json')), false)
   }))
 })
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.2] - 2026-11-12
+
+### Added
+
+- Web UI: a running turn keeps a line under the conversation, styled like the turn dividers, with a light sweeping through it. It shows how long the turn has run, the last turn's tokens and cache hit rate, and the latest context, and goes away once the turn's own divider lands. Tokens and cache are the last turn's because agents only report them when a turn ends.
+- Web UI: scroll up in a conversation and a "Back to bottom" button takes you back.
+- `-c, --config <file>` and `SUBAGENT_COCKPIT_CONFIG` run the server on another config file, and `--home <dir>` moves the whole home directory like `SUBAGENT_COCKPIT_HOME`. The command line wins over the environment. A config file you name must exist; only `<home>/config.json` is created with defaults.
+
+### Changed
+
+- README: from codex 0.166.0 (still so in 0.167.0) a custom Codex provider must be in `CODEX_HOME/config.toml`, with an example. Setting it only through codex-acp's `CODEX_CONFIG` and `MODEL_PROVIDER` fails every prompt with `This chat uses <id>, but your current provider is openai`.
+
+### Fixed
+
+- `snapshot` with `simplify` left every config option with all its choices. Grok's and a gateway's OpenCode model lists run to several thousand characters a session, so a poll of a few sessions went past Claude Code's limit for a tool result however few items it asked for. Each option now keeps only its current choice; `open`, `set_config` and `snapshot` without `simplify` still list them all.
+- Antigravity: `write_file` and `edit_file` (agy 1.5's names) came through as `other` tools with only a path, so neither the Web UI nor `snapshot` showed what they wrote. They are now edits, and since agy names only the file, the bridge reads it as the step starts and ends and sends the change as a standard ACP diff (files up to 1 MB).
+
 ## [0.2.1] - 2026-10-24
 
 ### Added

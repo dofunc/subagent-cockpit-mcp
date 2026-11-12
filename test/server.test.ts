@@ -455,6 +455,16 @@ describe('simplify snapshot and item', () => {
     assert.deepEqual([simplify.seq, simplify.reset, simplify.sessions[0].notifications], [full.seq, full.reset, full.sessions[0].notifications])
   }))
 
+  test('U316 simplify keeps only the current choice of each config option', () => withHarness({}, async ({ h, client }) => {
+    const session = await openVia(client, h)
+    const [full, simplify] = [await snap(client, { session }), await snap(client, { session, simplify: true })]
+    const options = full.sessions[0].config_options
+    assert.ok(options.length > 0 && options.every(option => option.options.length > 1))
+    const current = options.map(option => ({ ...option, options: option.options.filter(choice => choice.value === option.current_value) }))
+    assert.deepEqual(simplify.sessions[0].config_options, current)
+    assert.ok(current.every(option => option.options.length === 1))
+  }))
+
   test('U289 simplify keeps the child session of an OpenCode tool call', () => withHarness({
     adapter: 'opencode',
     scripts: { agent: { turns: [[{ update: { ...TOOL_CALL.update, _meta: { 'opencode/child-session': { id: 'ses_child', title: 'Check workflows' } } } }]] } },

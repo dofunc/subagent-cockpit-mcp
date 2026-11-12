@@ -6,7 +6,7 @@ import { CockpitError } from './adapter/adapter'
 import type { ApprovalVerb } from './adapter/adapter'
 import type { ConversationStore } from './conversation-store'
 import type { SessionManager } from './session/session-manager'
-import type { AnswerAction, AnswerContent, ConversationItemKind, ItemResult, SnapshotItem, SnapshotResult } from './types'
+import type { AnswerAction, AnswerContent, ConfigOptionInfo, ConversationItemKind, ItemResult, SnapshotItem, SnapshotResult } from './types'
 
 type Args = NonNullable<CallToolRequest['params']['arguments']>
 type Handler = (args: Args, signal: AbortSignal) => Promise<object> | object
@@ -143,8 +143,8 @@ const SNAPSHOT_DESCRIPTION = [
   'their input, output and diffs, plans, approvals, questions and agent-specific messages, plus each session\'s',
   'state and pending notifications. It can be large: pass session, and use last, types or exclude_types to keep',
   'it small. Pass back server_id and seq as since to get only what changed. ack is for UI clients that relay',
-  'notifications. UI clients that poll: pass simplify to leave out tool call details (input, output, content) and',
-  'session commands, and get one item in full with item.',
+  'notifications. UI clients that poll: pass simplify to leave out tool call details (input, output, content),',
+  'the choices of config options other than the current one and session commands, and get one item in full with item.',
 ].join(' ')
 
 const ITEM_DESCRIPTION = [
@@ -303,7 +303,7 @@ const SPECS: ToolSpec[] = [
       types: { ...ITEM_KIND_LIST, description: 'Only these item kinds' },
       exclude_types: { ...ITEM_KIND_LIST, description: 'Leave these item kinds out' },
       last: { type: 'integer', minimum: 1, description: 'Only the last n items, after the kind filters' },
-      simplify: { type: 'boolean', description: 'Tool items keep only their title, status and other header fields; commands are left out' },
+      simplify: { type: 'boolean', description: 'Tool items keep only their title, status and other header fields; config options keep only their current choice; commands are left out' },
     },
     output: object({
       server_id: str,
@@ -443,9 +443,14 @@ function snapshot(manager: SessionManager, store: ConversationStore, args: Args)
   const simplify = optBool(args, 'simplify', false)
   const sessions = base.sessions.map(({ commands, ...s }) => {
     const items = pick(store.items(s.session, reset ? undefined : since), types, exclude, last)
-    return simplify ? { ...s, items: items.map(toolHeader) } : { ...s, commands, items }
+    return simplify ? { ...s, config_options: s.config_options.map(currentChoice), items: items.map(toolHeader) } : { ...s, commands, items }
   })
   return { server_id: base.server_id, seq: store.seq, reset, sessions }
+}
+
+/** A config option cut to the choice it is on: a polling UI shows the current value, and model lists run to kilobytes. */
+function currentChoice(option: ConfigOptionInfo): ConfigOptionInfo {
+  return { ...option, options: option.options.filter(choice => choice.value === option.current_value) }
 }
 
 /** A tool item cut down to what its collapsed card shows; the details come one item at a time from `item`. */

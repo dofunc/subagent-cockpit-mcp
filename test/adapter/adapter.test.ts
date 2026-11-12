@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import type * as acp from '@agentclientprotocol/sdk'
 import { loadConfig } from '../../src/config'
@@ -885,6 +885,72 @@ describe('antigravity adapter', () => {
     assert.match(calls.get('step-2')?.title ?? '', /^run_command ls -la/)
     assert.deepEqual([calls.get('step-4')?.kind, calls.get('step-4')?.status], ['read', 'failed'])
     assert.equal((await agyRuns(h)).length, 1)
+  }))
+
+  test('U328 write_file and edit_file are edits, with a diff the bridge reads from the file around the step', () => withHarness({
+    adapter: 'antigravity',
+    agy: {
+      turns: [{
+        match: '^go$',
+        steps: [
+          { write: { path: '__CWD__/notes.md', text: '1. one\n2. two\n3. three\n4. four\n' } },
+          agyTool(2, 'edit_file', 'ACTIVE', { parameters: { Path: '__CWD__/notes.md' } }),
+          { sleep: 300 },
+          { write: { path: '__CWD__/notes.md', text: '1. one\n2. two\n3. three, revised\n4. four\n' } },
+          agyTool(2, 'edit_file', 'DONE', { output: null }),
+          agyTool(3, 'write_file', 'ACTIVE', { parameters: { Path: '__CWD__/new.md' } }),
+          { sleep: 300 },
+          { write: { path: '__CWD__/new.md', text: '1. a\n2. b\n' } },
+          agyTool(3, 'write_file', 'DONE', { output: null }),
+        ],
+      }],
+    },
+  }, async h => {
+    const { session } = await open(h)
+    const r = await h.manager.prompt(session, 'go', true)
+    assert.equal(r.status, 'done')
+    const calls = toolCalls(h, session)
+    const [edit, write] = [calls.get('step-2'), calls.get('step-3')]
+    // agy names files under its own cwd as the OS resolves it (/private/var for /var on macOS)
+    const dir = await realpath(h.dir)
+    assert.deepEqual([edit?.kind, edit?.status, write?.kind, write?.status], ['edit', 'completed', 'edit', 'completed'])
+    assert.deepEqual(edit?.content, [{ type: 'diff', path: join(dir, 'notes.md'), oldText: '1. one\n2. two\n3. three\n4. four\n', newText: '1. one\n2. two\n3. three, revised\n4. four\n' }])
+    assert.deepEqual(write?.content, [{ type: 'diff', path: join(dir, 'new.md'), oldText: null, newText: '1. a\n2. b\n' }])
+  }))
+
+  test('U329 an edit gets no diff when it fails, when its file is over 1 MB or unchanged; a relative path is read from the cwd', () => withHarness({
+    adapter: 'antigravity',
+    agy: {
+      turns: [{
+        match: '^go$',
+        steps: [
+          { write: { path: '__CWD__/rel.md', text: 'a\n' } },
+          agyTool(2, 'edit_file', 'ACTIVE', { parameters: { Path: 'rel.md' } }),
+          { sleep: 300 },
+          { write: { path: '__CWD__/rel.md', text: 'b\n' } },
+          agyTool(2, 'edit_file', 'DONE', { output: null }),
+          agyTool(3, 'edit_file', 'ACTIVE', { parameters: { Path: '__CWD__/rel.md' } }),
+          { sleep: 300 },
+          agyTool(3, 'edit_file', 'ERROR', { error: { message: 'denied' } }),
+          { write: { path: '__CWD__/big.md', text: 'x'.repeat(1024 * 1024 + 1) } },
+          agyTool(4, 'write_file', 'ACTIVE', { parameters: { Path: '__CWD__/big.md' } }),
+          { sleep: 300 },
+          { write: { path: '__CWD__/big.md', text: 'y\n' } },
+          agyTool(4, 'write_file', 'DONE', { output: null }),
+          agyTool(5, 'edit_file', 'ACTIVE', { parameters: { Path: '__CWD__/rel.md' } }),
+          { sleep: 300 },
+          agyTool(5, 'edit_file', 'DONE', { output: null }),
+        ],
+      }],
+    },
+  }, async h => {
+    const { session } = await open(h)
+    assert.equal((await h.manager.prompt(session, 'go', true)).status, 'done')
+    const calls = toolCalls(h, session)
+    assert.deepEqual(calls.get('step-2')?.content, [{ type: 'diff', path: join(h.dir, 'rel.md'), oldText: 'a\n', newText: 'b\n' }])
+    assert.equal(calls.get('step-3')?.status, 'failed')
+    assert.equal(calls.get('step-4')?.content, undefined)
+    assert.equal(calls.get('step-5')?.content, undefined)
   }))
 
   test('U187 denied actions end the turn with a note, never an approval', () => withHarness({

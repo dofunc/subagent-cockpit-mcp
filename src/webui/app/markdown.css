@@ -19,6 +19,27 @@
   font-weight: normal;
 }
 
+/*
+ * The running turn's divider text is in the primary color, with a light sweeping through it left to right: the
+ * gradient is three times the text's width and its bright middle moves from off the left edge to off the right one.
+ */
+.cockpit-turn-line-sweep {
+  color: transparent;
+  background: linear-gradient(90deg, var(--ant-color-primary) 40%, color-mix(in srgb, var(--ant-color-primary) 25%, #fff) 50%, var(--ant-color-primary) 60%);
+  background-size: 300% 100%;
+  background-clip: text;
+  animation: cockpit-running-sweep 1.8s linear infinite;
+}
+
+@keyframes cockpit-running-sweep {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
 /* x-markdown's themes set their own code font */
 .cockpit-conversation .x-markdown pre,
 .cockpit-conversation .x-markdown code {
